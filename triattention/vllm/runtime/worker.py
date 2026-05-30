@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu_worker import Worker as VLLMGPUWorker
+
+try:
+    from vllm.v1.worker.gpu_worker import Worker as VLLMGPUWorker
+except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
+    VLLMGPUWorker = object  # type: ignore[assignment]
 
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
@@ -19,7 +24,7 @@ def _debug_early_install_proxy_enabled() -> bool:
     return os.environ.get("TRIATTN_DEBUG_EARLY_INSTALL_PROXY", "0") == "1"
 
 
-def _maybe_backfill_model_path(worker: VLLMGPUWorker, config: TriAttentionRuntimeConfig) -> None:
+def _maybe_backfill_model_path(worker: Any, config: TriAttentionRuntimeConfig) -> None:
     if config.model_path is not None:
         return
     model_config = getattr(worker, "model_config", None)
@@ -32,7 +37,10 @@ class TriAttentionWorker(VLLMGPUWorker):
     """GPU worker that injects TriAttention model-runner proxy."""
 
     def init_device(self):
-        super().init_device()
+        super_init_device = getattr(super(), "init_device", None)
+        if not callable(super_init_device):
+            raise RuntimeError("vLLM GPU Worker is unavailable")
+        super_init_device()
         if isinstance(self.model_runner, TriAttentionModelRunner):
             return
 
@@ -81,4 +89,7 @@ class TriAttentionWorker(VLLMGPUWorker):
         signals = getattr(scheduler_output, "triattention_signals", None)
         if signals:
             self._ensure_triattention_runner_proxy()
-        return super().execute_model(scheduler_output)
+        super_execute_model = getattr(super(), "execute_model", None)
+        if not callable(super_execute_model):
+            raise RuntimeError("vLLM GPU Worker is unavailable")
+        return super_execute_model(scheduler_output)

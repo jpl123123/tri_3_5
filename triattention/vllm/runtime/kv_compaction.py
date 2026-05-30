@@ -390,18 +390,19 @@ def compact_request_kv_in_place(
     still `total_tokens`, otherwise dropped entries continue participating in
     attention softmax as zero-K tokens and corrupt generation quality.
     """
+    key_cache, value_cache = _split_kv_axes(kv_cache)
+    device = key_cache.device
     if isinstance(keep_token_indices, torch.Tensor):
-        keep_tensor = keep_token_indices.to(device=kv_cache.device, dtype=torch.long).flatten()
+        keep_tensor = keep_token_indices.to(device=device, dtype=torch.long).flatten()
     else:
         keep_tensor = torch.as_tensor(
             list(keep_token_indices),
-            device=kv_cache.device,
+            device=device,
             dtype=torch.long,
         )
     if keep_tensor.numel() == 0:
         return 0
 
-    key_cache, value_cache = _split_kv_axes(kv_cache)
     if keep_tensor.numel() > 0:
         min_idx = int(keep_tensor.min().item())
         max_idx = int(keep_tensor.max().item())
@@ -415,8 +416,6 @@ def compact_request_kv_in_place(
         raise ValueError("keep_token_indices must not contain duplicates")
 
     keep_count = int(keep_tensor.numel())
-    device = key_cache.device
-
     if preserve_dropped_tokens:
         if keep_count >= total_tokens:
             return keep_count

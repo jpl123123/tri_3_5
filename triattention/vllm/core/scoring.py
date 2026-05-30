@@ -254,9 +254,22 @@ def compute_scores_pytorch(
     """
     batch_size, num_kv_heads, seq_len, head_dim = key_states.shape
     freq_count = head_dim // 2
+    score_device = key_states.device
+
+    # Match the Triton kernel's numerical contract: K, Q statistics, RoPE
+    # frequencies, and frequency scales all participate in fp32 math.  This is
+    # especially important for torch_npu, where relying on implicit promotion
+    # from bf16 KV cache tensors can change score ordering near TopK boundaries.
+    key_states = key_states.to(dtype=torch.float32)
+    omega = omega.to(device=score_device, dtype=torch.float32)
+    offsets = offsets.to(device=score_device, dtype=torch.float32)
+    freq_scale_sq = freq_scale_sq.to(device=score_device, dtype=torch.float32)
 
     # Extract Q statistics
-    q_mean_complex = head_stats['q_mean_complex']  # [num_kv_heads, freq_count, 2]
+    q_mean_complex = head_stats['q_mean_complex'].to(
+        device=score_device,
+        dtype=torch.float32,
+    )  # [num_kv_heads, freq_count, 2]
     q_mean_real = q_mean_complex[..., 0]  # [num_kv_heads, freq_count]
     q_mean_imag = q_mean_complex[..., 1]  # [num_kv_heads, freq_count]
 
@@ -265,7 +278,10 @@ def compute_scores_pytorch(
 
     # Get q_abs_mean (mean of |Q_complex| across queries)
     if 'q_abs_mean' in head_stats:
-        q_abs_mean = head_stats['q_abs_mean']  # [num_kv_heads, freq_count]
+        q_abs_mean = head_stats['q_abs_mean'].to(
+            device=score_device,
+            dtype=torch.float32,
+        )  # [num_kv_heads, freq_count]
     else:
         # If not provided, assume it equals q_mean_abs (no MLR effect)
         q_abs_mean = q_mean_abs
@@ -359,4 +375,4 @@ def compute_scores_pytorch(
     if config.pruning_mode == "per_layer":
         scores = scores.mean(dim=1)  # [batch, seq_len]
 
-    return scores
+    return scores.to(dtype=config.topk_dtype)

@@ -35,6 +35,7 @@ _ORIG_SCHED_SCHEDULE: Callable[..., Any] | None = None
 _ORIG_SCHED_UPDATE_FROM_OUTPUT: Callable[..., Any] | None = None
 _ORIG_WORKER_INIT_DEVICE: Callable[..., Any] | None = None
 _ORIG_WORKER_EXECUTE_MODEL: Callable[..., Any] | None = None
+_ORIG_ASCEND_WORKER_METHODS: dict[type, dict[str, Callable[..., Any]]] = {}
 _ORIG_KVCACHE_ALLOCATE_SLOTS: Callable[..., Any] | None = None
 _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE: Callable[..., Any] | None = None
 
@@ -216,9 +217,7 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
     return outputs
 
 
-def _patched_worker_init_device(self):
-    assert _ORIG_WORKER_INIT_DEVICE is not None
-    _ORIG_WORKER_INIT_DEVICE(self)
+def _install_triattention_runner_proxy_state(self) -> None:
     if not _PATCHED_WORKER_ACTIVE:
         return
     if getattr(self, "_triattention_runner_proxy_installed", False):
@@ -231,6 +230,12 @@ def _patched_worker_init_device(self):
         logger.debug("TriAttention: eagerly installed runner proxy during worker init_device")
 
 
+def _patched_worker_init_device(self):
+    assert _ORIG_WORKER_INIT_DEVICE is not None
+    _ORIG_WORKER_INIT_DEVICE(self)
+    _install_triattention_runner_proxy_state(self)
+
+
 def _patched_worker_execute_model(self, scheduler_output):
     assert _ORIG_WORKER_EXECUTE_MODEL is not None
     if _PATCHED_WORKER_ACTIVE:
@@ -238,6 +243,99 @@ def _patched_worker_execute_model(self, scheduler_output):
         if signals:
             TriAttentionWorker._ensure_triattention_runner_proxy(self)
     return _ORIG_WORKER_EXECUTE_MODEL(self, scheduler_output)
+
+
+def _resolve_original_ascend_worker_method(
+    worker: Any,
+    method_name: str,
+) -> Callable[..., Any]:
+    for cls in type(worker).__mro__:
+        methods = _ORIG_ASCEND_WORKER_METHODS.get(cls)
+        if methods is not None and method_name in methods:
+            return methods[method_name]
+    raise RuntimeError(f"missing_original_ascend_worker_method:{method_name}")
+
+
+def _patched_ascend_worker_init_device(self):
+    _resolve_original_ascend_worker_method(self, "init_device")(self)
+    _install_triattention_runner_proxy_state(self)
+
+
+def _patched_ascend_worker_execute_model(self, scheduler_output):
+    if _PATCHED_WORKER_ACTIVE:
+        signals = getattr(scheduler_output, "triattention_signals", None)
+        if signals:
+            TriAttentionWorker._ensure_triattention_runner_proxy(self)
+    return _resolve_original_ascend_worker_method(self, "execute_model")(
+        self,
+        scheduler_output,
+    )
+
+
+def _patch_worker_class_for_triattention(
+    worker_cls: type,
+    *,
+    patch_init: bool,
+    patch_execute: bool,
+) -> bool:
+    if worker_cls in _ORIG_ASCEND_WORKER_METHODS:
+        return False
+    methods: dict[str, Callable[..., Any]] = {}
+    if patch_init:
+        init_device = getattr(worker_cls, "init_device", None)
+        if callable(init_device):
+            methods["init_device"] = init_device
+            worker_cls.init_device = _patched_ascend_worker_init_device
+    if patch_execute:
+        execute_model = getattr(worker_cls, "execute_model", None)
+        if callable(execute_model):
+            methods["execute_model"] = execute_model
+            worker_cls.execute_model = _patched_ascend_worker_execute_model
+    if not methods:
+        return False
+    worker_cls._ensure_triattention_runner_proxy = (
+        TriAttentionWorker._ensure_triattention_runner_proxy
+    )
+    _ORIG_ASCEND_WORKER_METHODS[worker_cls] = methods
+    return True
+
+
+def _install_optional_ascend_worker_patches() -> None:
+    patched: list[str] = []
+    try:
+        import vllm_ascend.worker.worker as ascend_worker_mod
+
+        if _patch_worker_class_for_triattention(
+            ascend_worker_mod.NPUWorker,
+            patch_init=True,
+            patch_execute=True,
+        ):
+            patched.append("vllm_ascend.worker.worker.NPUWorker")
+    except Exception:
+        return
+
+    optional_workers = (
+        ("vllm_ascend._310p.worker_310p", "NPUWorker310"),
+        ("vllm_ascend.xlite.xlite_worker", "XliteWorker"),
+    )
+    for module_name, class_name in optional_workers:
+        try:
+            module = __import__(module_name, fromlist=[class_name])
+            worker_cls = getattr(module, class_name)
+            if _patch_worker_class_for_triattention(
+                worker_cls,
+                patch_init=True,
+                patch_execute=False,
+            ):
+                patched.append(f"{module_name}.{class_name}")
+        except Exception:
+            continue
+
+    if patched:
+        logger.info(
+            "Installed TriAttention runtime worker patches for Ascend: %s",
+            ", ".join(patched),
+        )
 
 
 def _patched_kv_cache_allocate_slots(
@@ -416,12 +514,17 @@ def install_vllm_integration_monkeypatches(
     import vllm.v1.core.sched.scheduler as sched_mod
     import vllm.v1.core.kv_cache_manager as kv_cache_manager_mod
     import vllm.v1.engine.core as engine_core_mod
-    import vllm.v1.worker.gpu_worker as worker_mod
 
     EngineCore = engine_core_mod.EngineCore
     Scheduler = sched_mod.Scheduler
     KVCacheManager = kv_cache_manager_mod.KVCacheManager
-    Worker = worker_mod.Worker
+    Worker = None
+    try:
+        import vllm.v1.worker.gpu_worker as worker_mod
+
+        Worker = worker_mod.Worker
+    except Exception:
+        logger.debug("TriAttention could not import vLLM GPU Worker", exc_info=True)
 
     if patch_scheduler:
         _ORIG_SCHED_INIT = Scheduler.__init__
@@ -448,11 +551,15 @@ def install_vllm_integration_monkeypatches(
         EngineCore.step_with_batch_queue = _patched_engine_core_step_with_batch_queue
 
     if patch_worker:
-        _ORIG_WORKER_INIT_DEVICE = Worker.init_device
-        _ORIG_WORKER_EXECUTE_MODEL = Worker.execute_model
-        Worker.init_device = _patched_worker_init_device
-        Worker.execute_model = _patched_worker_execute_model
-        Worker._ensure_triattention_runner_proxy = TriAttentionWorker._ensure_triattention_runner_proxy
+        if Worker is not None:
+            _ORIG_WORKER_INIT_DEVICE = Worker.init_device
+            _ORIG_WORKER_EXECUTE_MODEL = Worker.execute_model
+            Worker.init_device = _patched_worker_init_device
+            Worker.execute_model = _patched_worker_execute_model
+            Worker._ensure_triattention_runner_proxy = (
+                TriAttentionWorker._ensure_triattention_runner_proxy
+            )
+        _install_optional_ascend_worker_patches()
 
     # Relax the KV cache memory check: TriAttention compresses KV cache
     # during generation, so the physical blocks needed are less than what

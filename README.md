@@ -64,6 +64,7 @@ Pre-RoPE Q/K vectors in long reasoning models concentrate around fixed centers t
 - [Calibration Guide](docs/calibration.md) -- generating custom Q/K statistics
 - [MLX Support](docs/mlx.md) -- supporting Apple Silicon Macs (M1/M2/M3/M4) via the MLX
 - [SGLang Integration](docs/sglang.md) -- deploying TriAttention with SGLang as the inference backend
+- [vLLM-Ascend Integration](docs/vllm_ascend.md) -- deploying TriAttention on Huawei Ascend NPUs through vLLM-Ascend
 - [Video Generation](longlive/README.md) -- KV cache compression for long video generation with LongLive
 - [Full Results](docs/results.md) -- complete tables, figures, and analysis
 
@@ -250,6 +251,7 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_DIVIDE_LENGTH` | `128` | Compression trigger interval (every N new tokens) |
 | `TRIATTN_RUNTIME_WINDOW_SIZE` | `128` | Recent tokens always preserved |
 | `TRIATTN_RUNTIME_PRUNING_MODE` | `per_head` | Token selection strategy (`per_head` or `per_layer_per_head`) |
+| `TRIATTN_RUNTIME_SCORING_BACKEND` | `auto` | Scoring backend (`auto`, `triton`, `torch`/`pytorch`); `auto` uses PyTorch/torch_npu on vLLM-Ascend |
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_KV_COMPACTION` | `true` | Enable in-place KV cache compaction |

@@ -33,6 +33,18 @@ class PreparedGroupSelection:
     selection_mode: str
 
 
+def _kv_cache_device(kv_cache: Any) -> torch.device:
+    if isinstance(kv_cache, torch.Tensor):
+        return kv_cache.device
+    if (
+        isinstance(kv_cache, (list, tuple))
+        and kv_cache
+        and isinstance(kv_cache[0], torch.Tensor)
+    ):
+        return kv_cache[0].device
+    raise RuntimeError(f"unsupported_kv_cache_ref:{type(kv_cache).__name__}")
+
+
 def _load_override_first_keep_tensor() -> torch.Tensor:
     global _OVERRIDE_FIRST_KEEP_CACHE
     if _OVERRIDE_FIRST_KEEP_CACHE is not None:
@@ -95,7 +107,7 @@ def prepare_group_layer_compactions(
     *,
     req_id: str,
     gid: int,
-    layer_tensors: list[tuple[int, torch.Tensor]],
+    layer_tensors: list[tuple[int, Any]],
     normalized_block_ids: list[int],
     block_size: int,
     group_total_tokens: int,
@@ -129,7 +141,7 @@ def prepare_group_layer_compactions(
             if getattr(select_keep_indices_for_group, "_supports_paged_group", False):
 
                 def _iter_layer_kv() -> Iterable[
-                    tuple[int, torch.Tensor, list[int] | torch.Tensor, int]
+                    tuple[int, Any, list[int] | torch.Tensor, int]
                 ]:
                     for layer_idx, kv_cache in layer_tensors:
                         yield layer_idx, kv_cache, normalized_block_ids, block_size
@@ -148,14 +160,15 @@ def prepare_group_layer_compactions(
 
                 def _iter_layer_inputs() -> Iterable[tuple[int, torch.Tensor]]:
                     for layer_idx, kv_cache in layer_tensors:
-                        block_ids_tensor = block_ids_tensor_cache.get(kv_cache.device)
+                        cache_device = _kv_cache_device(kv_cache)
+                        block_ids_tensor = block_ids_tensor_cache.get(cache_device)
                         if block_ids_tensor is None:
                             block_ids_tensor = torch.as_tensor(
                                 normalized_block_ids,
-                                device=kv_cache.device,
+                                device=cache_device,
                                 dtype=torch.long,
                             )
-                            block_ids_tensor_cache[kv_cache.device] = block_ids_tensor
+                            block_ids_tensor_cache[cache_device] = block_ids_tensor
                         keys_dense = gather_dense(
                             kv_cache=kv_cache,
                             block_ids=block_ids_tensor,
@@ -181,14 +194,15 @@ def prepare_group_layer_compactions(
             ) from exc
 
     for layer_idx, kv_cache in layer_tensors:
-        block_ids_tensor = block_ids_tensor_cache.get(kv_cache.device)
+        cache_device = _kv_cache_device(kv_cache)
+        block_ids_tensor = block_ids_tensor_cache.get(cache_device)
         if block_ids_tensor is None:
             block_ids_tensor = torch.as_tensor(
                 normalized_block_ids,
-                device=kv_cache.device,
+                device=cache_device,
                 dtype=torch.long,
             )
-            block_ids_tensor_cache[kv_cache.device] = block_ids_tensor
+            block_ids_tensor_cache[cache_device] = block_ids_tensor
 
         selected: dict[str, Any] | None = selected_for_group
         if selected is None and select_keep_indices is not None:

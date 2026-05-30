@@ -40,7 +40,7 @@ class LayerCompactionResult:
 @dataclass(frozen=True)
 class PreparedLayerCompaction:
     layer_idx: int
-    kv_cache: torch.Tensor
+    kv_cache: Any
     block_ids: torch.Tensor
     keep_plan: KeepPlan
 
@@ -56,7 +56,7 @@ class GroupCompactionOutcome:
 
 def compact_layer_with_keep_plan(
     *,
-    kv_cache: torch.Tensor,
+    kv_cache: Any,
     block_ids: torch.Tensor,
     block_size: int,
     keep_plan: KeepPlan,

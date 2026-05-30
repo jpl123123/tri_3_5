@@ -56,7 +56,10 @@ def build_triattention_selector(
     try:
         from triattention.vllm.core.config import TriAttentionConfig
         from triattention.vllm.core.compressor import TriAttentionCompressor
-        from triattention.vllm.core.scoring import compute_scores_triton
+        from triattention.vllm.core.scoring import (
+            compute_scores_pytorch,
+            compute_scores_triton,
+        )
         from triattention.vllm.core.utils import normalize_scores
     except Exception as exc:  # pragma: no cover - import safety
         raise RuntimeError(
@@ -97,6 +100,40 @@ def build_triattention_selector(
 
     effective_model_path = _resolve_effective_model_path()
 
+    def _resolve_effective_device() -> torch.device | None:
+        if base_runner is None:
+            return None
+        candidates: list[Any] = [
+            getattr(base_runner, "device", None),
+            getattr(getattr(base_runner, "device_config", None), "device", None),
+            getattr(
+                getattr(getattr(base_runner, "vllm_config", None), "device_config", None),
+                "device",
+                None,
+            ),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, torch.device):
+                return candidate
+            if isinstance(candidate, str) and candidate.strip():
+                try:
+                    return torch.device(candidate.strip())
+                except Exception:
+                    continue
+        return None
+
+    effective_device = _resolve_effective_device()
+    device_type = effective_device.type if effective_device is not None else None
+    scoring_backend = getattr(config, "scoring_backend", "auto").strip().lower()
+    use_torch_scoring = scoring_backend in {"torch", "pytorch"} or (
+        scoring_backend == "auto" and device_type not in {None, "cuda"}
+    )
+    score_backend_name = "torch" if use_torch_scoring else "triton"
+
+    tri_cfg_kwargs: dict[str, Any] = {}
+    if effective_device is not None:
+        tri_cfg_kwargs["device"] = effective_device
+
     tri_cfg = TriAttentionConfig(
         stats_path=stats_path,
         model_path=effective_model_path,
@@ -111,9 +148,11 @@ def build_triattention_selector(
         disable_mlr=config.disable_mlr,
         disable_trig=config.disable_trig,
         disable_top_n_high_freq=config.disable_top_n_high_freq,
-        use_triton_scoring=True,
+        use_triton_scoring=not use_torch_scoring,
+        use_trig_cache=not use_torch_scoring,
         compute_dtype=torch.float32,
         topk_dtype=torch.float32,
+        **tri_cfg_kwargs,
     )
     compressor = TriAttentionCompressor(tri_cfg)
     available_layers_sorted: tuple[int, ...] | None = None
@@ -143,6 +182,28 @@ def build_triattention_selector(
         return available_layers_sorted[layer_idx % len(available_layers_sorted)]
 
     reduced_head_stats_cache: dict[tuple[int, int], tuple[dict[str, torch.Tensor], torch.Tensor]] = {}
+
+    def _kv_cache_key_tensor(kv_cache: Any) -> torch.Tensor:
+        if isinstance(kv_cache, torch.Tensor):
+            return kv_cache
+        if (
+            isinstance(kv_cache, (list, tuple))
+            and kv_cache
+            and isinstance(kv_cache[0], torch.Tensor)
+        ):
+            return kv_cache[0]
+        raise RuntimeError(f"unsupported_kv_cache_ref:{type(kv_cache).__name__}")
+
+    def _kv_cache_num_heads(kv_cache: Any) -> int:
+        key_tensor = _kv_cache_key_tensor(kv_cache)
+        if key_tensor.ndim == 4:
+            return int(key_tensor.shape[2])
+        if key_tensor.ndim == 5:
+            return int(key_tensor.shape[3])
+        raise RuntimeError(f"unsupported_kv_cache_rank:{key_tensor.ndim}")
+
+    def _kv_cache_device(kv_cache: Any) -> torch.device:
+        return _kv_cache_key_tensor(kv_cache).device
 
     def _build_reduced_layer_stats(
         *,
@@ -311,6 +372,17 @@ def build_triattention_selector(
             else keys_dense
         )
         try:
+            if use_torch_scoring:
+                return compute_scores_pytorch(
+                    key_states=score_inputs,
+                    cache_positions=None,
+                    head_stats=score_head_stats,
+                    omega=compressor.omega,
+                    offsets=compressor.offsets,
+                    freq_scale_sq=score_freq_scale_sq,
+                    config=tri_cfg,
+                    round_start=round_start,
+                )
             return compute_scores_triton(
                 key_states=score_inputs,
                 cache_positions=None,
@@ -324,7 +396,7 @@ def build_triattention_selector(
             )
         except Exception as exc:
             raise RuntimeError(
-                f"{TRITON_SCORING_REQUIRED_MARKER}:score_failed:{type(exc).__name__}"
+                f"{TRITON_SCORING_REQUIRED_MARKER}:score_failed:{score_backend_name}:{type(exc).__name__}"
             ) from exc
 
     def _finalize_layer_scores(
@@ -363,7 +435,7 @@ def build_triattention_selector(
 
     def _compute_layer_scores_paged(
         *,
-        kv_cache: torch.Tensor,
+        kv_cache: Any,
         block_ids: list[int] | torch.Tensor,
         block_size: int,
         total_tokens: int,
@@ -372,7 +444,7 @@ def build_triattention_selector(
         prefill_len: int,
         protect_prefill: bool,
     ) -> torch.Tensor:
-        runtime_heads = int(kv_cache.shape[3])
+        runtime_heads = _kv_cache_num_heads(kv_cache)
         (
             score_head_stats,
             score_freq_scale_sq,
@@ -472,7 +544,7 @@ def build_triattention_selector(
 
     def _select_keep_indices_paged_streaming(
         *,
-        kv_cache: torch.Tensor,
+        kv_cache: Any,
         block_ids: list[int] | torch.Tensor,
         block_size: int,
         total_tokens: int,
@@ -482,7 +554,7 @@ def build_triattention_selector(
         round_start: int,
         budget_total: int,
     ) -> dict[str, Any]:
-        runtime_heads = int(kv_cache.shape[3])
+        runtime_heads = _kv_cache_num_heads(kv_cache)
         (
             score_head_stats,
             score_freq_scale_sq,
@@ -679,7 +751,7 @@ def build_triattention_selector(
     def _select_keep_indices(
         *,
         keys_dense: torch.Tensor | None = None,
-        kv_cache: torch.Tensor | None = None,
+        kv_cache: Any | None = None,
         block_ids: list[int] | torch.Tensor | None = None,
         block_size: int | None = None,
         total_tokens: int,
@@ -752,7 +824,7 @@ def build_triattention_selector(
         layer_input_iter: Callable[[], Iterable[tuple[int, torch.Tensor]]] | None = None,
         layer_kv_iter: Callable[
             [],
-            Iterable[tuple[int, torch.Tensor, list[int] | torch.Tensor, int]],
+            Iterable[tuple[int, Any, list[int] | torch.Tensor, int]],
         ]
         | None = None,
         total_tokens: int,
@@ -767,30 +839,27 @@ def build_triattention_selector(
             return None
         if total_tokens <= budget_total:
             head_count = 0
+            first_item: Any | None = None
+            indices_device = torch.device("cpu")
             if layer_inputs:
                 head_count = int(layer_inputs[0][1].shape[1])
+                indices_device = layer_inputs[0][1].device
             elif layer_input_iter is not None:
                 first_item = next(iter(layer_input_iter()), None)
                 if first_item is not None:
                     head_count = int(first_item[1].shape[1])
+                    indices_device = first_item[1].device
             elif layer_kv_iter is not None:
                 first_item = next(iter(layer_kv_iter()), None)
                 if first_item is not None:
-                    head_count = int(first_item[1].shape[3])
+                    head_count = _kv_cache_num_heads(first_item[1])
+                    indices_device = _kv_cache_device(first_item[1])
             if head_count <= 0:
                 return {"mode": "per_head", "indices": []}
             all_indices = torch.arange(
                 total_tokens,
                 dtype=torch.long,
-                device=(
-                    layer_inputs[0][1].device
-                    if layer_inputs
-                    else (
-                        first_item[1].device
-                        if first_item is not None
-                        else torch.device("cpu")
-                    )
-                ),
+                device=indices_device,
             )
             return {
                 "mode": "per_head",
@@ -825,7 +894,7 @@ def build_triattention_selector(
                 return {"mode": "per_head", "indices": []}
             prepared_layers: list[dict[str, Any]] = []
             for layer_idx, kv_cache, block_ids, layer_block_size in layer_entries:
-                runtime_heads = int(kv_cache.shape[3])
+                runtime_heads = _kv_cache_num_heads(kv_cache)
                 (
                     score_head_stats,
                     score_freq_scale_sq,
@@ -925,7 +994,7 @@ def build_triattention_selector(
                     total_tokens=total_tokens,
                     prefill_len=prefill_len,
                     protect_prefill=protect_prefill,
-                    device=prepared_layers[0]["kv_cache"].device,
+                    device=_kv_cache_device(prepared_layers[0]["kv_cache"]),
                 )
                 chunk_agg: torch.Tensor | None = None
                 layer_count = 0
@@ -1080,4 +1149,4 @@ def build_triattention_selector(
 
     setattr(_select_keep_indices, "_supports_paged", True)
     setattr(_select_keep_indices_for_group_per_head, "_supports_paged_group", True)
-    return _select_keep_indices, _select_keep_indices_for_group_per_head, "enabled"
+    return _select_keep_indices, _select_keep_indices_for_group_per_head, f"enabled:{score_backend_name}"
