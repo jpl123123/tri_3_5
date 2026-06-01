@@ -134,6 +134,43 @@ def build_triattention_selector(
     if effective_device is not None:
         tri_cfg_kwargs["device"] = effective_device
 
+    def _resolve_tensor_parallel_info() -> tuple[int, int]:
+        try:
+            from vllm.distributed import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size,
+            )
+
+            tp_size = int(get_tensor_model_parallel_world_size())
+            tp_rank = int(get_tensor_model_parallel_rank())
+            if tp_size > 0:
+                return max(0, tp_rank), max(1, tp_size)
+        except Exception:
+            pass
+
+        if base_runner is None:
+            return 0, 1
+        parallel_configs = [
+            getattr(base_runner, "parallel_config", None),
+            getattr(getattr(base_runner, "vllm_config", None), "parallel_config", None),
+        ]
+        for parallel_config in parallel_configs:
+            if parallel_config is None:
+                continue
+            tp_size = int(getattr(parallel_config, "tensor_parallel_size", 1) or 1)
+            tp_rank = int(
+                getattr(
+                    parallel_config,
+                    "tensor_parallel_rank",
+                    getattr(base_runner, "tp_rank", 0),
+                )
+                or 0
+            )
+            return max(0, tp_rank), max(1, tp_size)
+        return 0, 1
+
+    tp_rank, tp_size = _resolve_tensor_parallel_info()
+
     tri_cfg = TriAttentionConfig(
         stats_path=stats_path,
         model_path=effective_model_path,
@@ -181,7 +218,8 @@ def build_triattention_selector(
             return layer_idx
         return available_layers_sorted[layer_idx % len(available_layers_sorted)]
 
-    reduced_head_stats_cache: dict[tuple[int, int], tuple[dict[str, torch.Tensor], torch.Tensor]] = {}
+    reduced_head_stats_cache: dict[tuple[Any, ...], tuple[dict[str, torch.Tensor], torch.Tensor]] = {}
+    tp_sliced_head_stats_cache: dict[tuple[int, int, int, int], tuple[dict[str, torch.Tensor], torch.Tensor]] = {}
 
     def _kv_cache_key_tensor(kv_cache: Any) -> torch.Tensor:
         if isinstance(kv_cache, torch.Tensor):
@@ -205,18 +243,55 @@ def build_triattention_selector(
     def _kv_cache_device(kv_cache: Any) -> torch.device:
         return _kv_cache_key_tensor(kv_cache).device
 
-    def _build_reduced_layer_stats(
+    def _slice_tensor_parallel_layer_stats(
         *,
         resolved_layer_idx: int,
-        target_heads: int,
+        layer_stats: dict[str, torch.Tensor],
+        layer_freq_scale_sq: torch.Tensor,
+        runtime_heads: int,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        cache_key = (resolved_layer_idx, target_heads)
+        stats_heads = int(layer_freq_scale_sq.shape[0])
+        if tp_size <= 1 or runtime_heads <= 0 or stats_heads == runtime_heads:
+            return layer_stats, layer_freq_scale_sq
+        if stats_heads % tp_size != 0:
+            return layer_stats, layer_freq_scale_sq
+        local_stats_heads = stats_heads // tp_size
+        if local_stats_heads < runtime_heads or local_stats_heads % runtime_heads != 0:
+            return layer_stats, layer_freq_scale_sq
+        local_rank = min(max(0, int(tp_rank)), tp_size - 1)
+        cache_key = (resolved_layer_idx, stats_heads, local_rank, tp_size)
+        cached = tp_sliced_head_stats_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        start = local_rank * local_stats_heads
+        end = start + local_stats_heads
+        sliced_stats: dict[str, torch.Tensor] = {}
+        for name, value in layer_stats.items():
+            if (
+                isinstance(value, torch.Tensor)
+                and value.ndim > 0
+                and int(value.shape[0]) == stats_heads
+            ):
+                sliced_stats[name] = value[start:end].contiguous()
+            else:
+                sliced_stats[name] = value
+        sliced_freq_scale_sq = layer_freq_scale_sq[start:end].contiguous()
+        sliced = (sliced_stats, sliced_freq_scale_sq)
+        tp_sliced_head_stats_cache[cache_key] = sliced
+        return sliced
+
+    def _reduce_head_stats_to_target(
+        *,
+        layer_stats: dict[str, torch.Tensor],
+        layer_freq_scale_sq: torch.Tensor,
+        target_heads: int,
+        cache_key: tuple[Any, ...],
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         cached = reduced_head_stats_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        layer_stats = compressor.head_stats[resolved_layer_idx]
-        layer_freq_scale_sq = compressor.freq_scale_sq[resolved_layer_idx]
         source_heads = int(layer_freq_scale_sq.shape[0])
         if source_heads == target_heads:
             reduced = (layer_stats, layer_freq_scale_sq)
@@ -308,6 +383,12 @@ def build_triattention_selector(
         resolved_layer_idx = _resolve_layer_idx_for_stats(layer_idx)
         layer_head_stats = compressor.head_stats[resolved_layer_idx]
         layer_freq_scale_sq = compressor.freq_scale_sq[resolved_layer_idx]
+        layer_head_stats, layer_freq_scale_sq = _slice_tensor_parallel_layer_stats(
+            resolved_layer_idx=resolved_layer_idx,
+            layer_stats=layer_head_stats,
+            layer_freq_scale_sq=layer_freq_scale_sq,
+            runtime_heads=runtime_heads,
+        )
         stats_heads = int(layer_freq_scale_sq.shape[0])
         use_hf_group_max = (
             stats_heads != runtime_heads
@@ -329,9 +410,18 @@ def build_triattention_selector(
                 )
             group_size = stats_heads // runtime_heads
         elif stats_heads != runtime_heads:
-            score_head_stats, score_freq_scale_sq = _build_reduced_layer_stats(
-                resolved_layer_idx=resolved_layer_idx,
+            score_head_stats, score_freq_scale_sq = _reduce_head_stats_to_target(
+                layer_stats=layer_head_stats,
+                layer_freq_scale_sq=layer_freq_scale_sq,
                 target_heads=runtime_heads,
+                cache_key=(
+                    "tp_local",
+                    resolved_layer_idx,
+                    runtime_heads,
+                    tp_rank,
+                    tp_size,
+                    stats_heads,
+                ),
             )
         return score_head_stats, score_freq_scale_sq, use_hf_group_max, group_size
 
@@ -1149,4 +1239,8 @@ def build_triattention_selector(
 
     setattr(_select_keep_indices, "_supports_paged", True)
     setattr(_select_keep_indices_for_group_per_head, "_supports_paged_group", True)
-    return _select_keep_indices, _select_keep_indices_for_group_per_head, f"enabled:{score_backend_name}"
+    return (
+        _select_keep_indices,
+        _select_keep_indices_for_group_per_head,
+        f"enabled:{score_backend_name}:tp={tp_rank}/{tp_size}",
+    )

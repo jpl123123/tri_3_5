@@ -84,8 +84,10 @@ At startup, look for these log lines:
 Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.worker.NPUWorker
 ```
 
-Compression events should report `selector_status=enabled:torch` when the first
-compression boundary is reached on NPU.
+Compression events should report a status like `selector_status=enabled:torch:tp=1/2`
+when the first compression boundary is reached on NPU. The `tp=rank/size`
+suffix confirms that runtime scoring is using this worker's tensor-parallel
+head shard.
 
 ## Calibration Stats
 
@@ -96,6 +98,8 @@ layout used for serving. See [Calibration Guide](calibration.md).
 ## Current Limits
 
 - Dense attention KV caches are the primary supported Ascend path.
+- Tensor parallel serving is supported by slicing calibration statistics to the
+  local TP head shard before TopK selection.
 - Ascend sparse attention or MLA layouts may attach extra tensors after
   `(k_cache, v_cache)`. The current compaction path moves the dense K/V tensors
   and should be validated before using those model families in production.
