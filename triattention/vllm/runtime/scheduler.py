@@ -227,6 +227,7 @@ class TriAttentionScheduler(Scheduler):
             request = self.requests.get(req_id)
             if request is None:
                 continue
+            scheduled_tokens_i = int(scheduled_tokens)
             prefill_len = self._prefill_lens.get(req_id)
             if prefill_len is None:
                 prefill_len = self._resolve_prefill_len(req_id)
@@ -235,7 +236,8 @@ class TriAttentionScheduler(Scheduler):
             if (
                 _should_defer_prefill_compression_for_scheduler(self)
                 and prefill_len > 0
-                and (int(request.num_computed_tokens) + int(scheduled_tokens)) < prefill_len
+                and scheduled_tokens_i > 1
+                and (int(request.num_computed_tokens) + scheduled_tokens_i) < prefill_len
             ):
                 continue
             has_override = self._effective_len_tracker.has_effective_len_override(req_id)
@@ -248,7 +250,7 @@ class TriAttentionScheduler(Scheduler):
                 # Common pre-compression path: effective cache length is exactly
                 # num_computed_tokens, so avoid tracker writes in the decode hot path.
                 effective_base_len = request.num_computed_tokens
-            estimated_cache_len = effective_base_len + scheduled_tokens
+            estimated_cache_len = effective_base_len + scheduled_tokens_i
 
             if not has_override:
                 if compression_disabled and not kv_usage_enabled:
@@ -274,7 +276,7 @@ class TriAttentionScheduler(Scheduler):
                 prefill_len=prefill_len,
                 step=self._triattention_step,
                 kv_usage=kv_usage,
-                scheduled_tokens=scheduled_tokens,
+                scheduled_tokens=scheduled_tokens_i,
             )
             # Keep scheduler->runner side-channel sparse to reduce per-step IPC
             # metadata overhead in the common no-compression decode path.

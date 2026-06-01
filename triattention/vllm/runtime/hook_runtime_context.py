@@ -99,6 +99,16 @@ def _is_ascend_runner(base_runner: Any) -> bool:
     return "vllm_ascend" in repr(type(base_runner))
 
 
+def _is_request_scheduled_as_prefill(scheduler_output: Any, req_id: str) -> bool:
+    scheduled_new_reqs = getattr(scheduler_output, "scheduled_new_reqs", None)
+    if not isinstance(scheduled_new_reqs, list):
+        return False
+    for new_req in scheduled_new_reqs:
+        if getattr(new_req, "req_id", None) == req_id:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class HookRuntimeContext:
     scheduled_tokens: int
@@ -170,7 +180,18 @@ def build_hook_runtime_context(
         setattr(base_runner, "_triattention_active_recent_unabsorbed_tokens", None)
 
     prefill_len = int(getattr(signal, "prefill_len", 0) or 0)
-    prefill_incomplete = prefill_len > 0 and num_computed_tokens < prefill_len
+    is_prefill_step = (
+        _is_request_scheduled_as_prefill(scheduler_output, req_id)
+        or scheduled_tokens > 1
+    )
+    prefill_tokens_after_step = num_computed_tokens + (
+        scheduled_tokens if _post_forward else 0
+    )
+    prefill_incomplete = (
+        prefill_len > 0
+        and is_prefill_step
+        and prefill_tokens_after_step < prefill_len
+    )
 
     defer_for_prefill = (
         config.enable_experimental_kv_compaction

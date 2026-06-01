@@ -10,7 +10,7 @@ import torch
 
 from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
-from .kv_compaction import gather_request_k_dense_range
+from .kv_compaction import build_keep_token_indices, gather_request_k_dense_range
 
 def build_triattention_selector(
     config: TriAttentionRuntimeConfig,
@@ -38,6 +38,50 @@ def build_triattention_selector(
     strict_triton_required = bool(
         config.enable_experimental_kv_compaction and config.require_triton_scoring
     )
+    if bool(getattr(config, "fast_recency_only", False)):
+
+        def _select_keep_indices_recency(
+            *,
+            total_tokens: int,
+            prefill_len: int,
+            protect_prefill: bool,
+            budget_total: int,
+            **_: Any,
+        ) -> dict[str, Any] | None:
+            keep_indices = build_keep_token_indices(
+                total_tokens=total_tokens,
+                kv_budget=budget_total,
+                prefill_len=prefill_len,
+                protect_prefill=protect_prefill,
+                include_prefill_in_budget=True,
+            )
+            if keep_indices is None:
+                return None
+            return {"mode": "shared", "indices": keep_indices}
+
+        def _select_keep_indices_for_group_recency(
+            *,
+            total_tokens: int,
+            prefill_len: int,
+            protect_prefill: bool,
+            budget_total: int,
+            **_: Any,
+        ) -> dict[str, Any] | None:
+            return _select_keep_indices_recency(
+                total_tokens=total_tokens,
+                prefill_len=prefill_len,
+                protect_prefill=protect_prefill,
+                budget_total=budget_total,
+            )
+
+        setattr(_select_keep_indices_recency, "_supports_paged", True)
+        setattr(_select_keep_indices_for_group_recency, "_supports_paged_group", True)
+        return (
+            _select_keep_indices_recency,
+            _select_keep_indices_for_group_recency,
+            "enabled:recency_only",
+        )
+
     if config.sparse_stats_path is None:
         if strict_triton_required:
             raise RuntimeError(

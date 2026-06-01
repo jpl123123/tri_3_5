@@ -105,6 +105,11 @@ For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression
 should happen once the prompt has finished prefill and decode starts.
 
+If proxy injection is visible but no compression line appears, the runtime now
+backfills request state from the NPU runner and allows the first decode step to
+trigger compression even when vLLM-Ascend's scheduler counters still lag behind
+the full prompt length.
+
 ## Performance Tuning
 
 The default selector scores every layer to preserve the closest behavior to the
@@ -122,6 +127,19 @@ export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 cross-layer aggregation. Use `8` as the conservative first setting, then try `4`
 if quality is stable. The runtime log will include
 `selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
+
+To isolate selector overhead from the NPU attention speedup, run one benchmark
+with the recency-only selector:
+
+```bash
+export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
+```
+
+This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. The
+expected compression status is `selector_status=enabled:recency_only`. If this
+mode still does not improve TPOT, the bottleneck is likely outside TriAttention
+scoring, for example ACL graph replay or an attention kernel path that is not
+benefiting from shorter effective `seq_lens`.
 
 ## Calibration Stats
 

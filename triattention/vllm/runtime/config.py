@@ -46,6 +46,7 @@ class TriAttentionRuntimeConfig:
     score_chunk_max_tokens: int = 4096
     score_max_layers: int = 0
     score_layer_stride: int = 1
+    fast_recency_only: bool = False
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -153,6 +154,10 @@ class TriAttentionRuntimeConfig:
             score_layer_stride=maybe_int(
                 "SCORE_LAYER_STRIDE",
                 cls.score_layer_stride,
+            ),
+            fast_recency_only=maybe_bool(
+                "FAST_RECENCY_ONLY",
+                cls.fast_recency_only,
             ),
             sparse_stats_path=Path(sparse_stats_path_raw) if sparse_stats_path_raw else None,
             model_path=Path(model_path_raw) if model_path_raw else None,

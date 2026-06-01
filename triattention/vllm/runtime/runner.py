@@ -18,6 +18,7 @@ from .runner_output_bridge import (
     execute_base_model_with_effective_overrides,
 )
 from .runner_state_updates import (
+    _resolve_full_prefill_len_from_request_like,
     cleanup_finished_requests,
     consume_runner_signals,
     mark_preemptions,
@@ -125,6 +126,52 @@ class TriAttentionModelRunner:
             return None
         return int(num_blocks_per_row[req_index]) * blk_size
 
+    def _resolve_prefill_len_for_existing_request(self, req_id: str) -> int:
+        """Best-effort prompt length lookup for requests that predate proxy state."""
+        candidates: list[int] = []
+        requests = getattr(self._base_runner, "requests", None)
+        if isinstance(requests, dict):
+            req_state = requests.get(req_id)
+            if req_state is not None:
+                candidates.append(_resolve_full_prefill_len_from_request_like(req_state))
+
+        input_batch = getattr(self._base_runner, "input_batch", None)
+        req_id_to_index = getattr(input_batch, "req_id_to_index", None) if input_batch else None
+        req_index = req_id_to_index.get(req_id) if isinstance(req_id_to_index, dict) else None
+        if isinstance(req_index, int):
+            for attr_name in ("num_prompt_tokens", "prompt_lens", "prompt_lengths"):
+                prompt_lens = getattr(input_batch, attr_name, None)
+                if prompt_lens is None:
+                    continue
+                try:
+                    value = prompt_lens[req_index]
+                    if hasattr(value, "item"):
+                        value = value.item()
+                    candidates.append(int(value))
+                except Exception:
+                    continue
+
+        return max(candidates, default=0)
+
+    def _ensure_state_for_existing_request(self, req_id: str) -> Any:
+        state = self.state_store.get(req_id) if hasattr(self.state_store, "get") else None
+        if state is not None:
+            return state
+        prefill_len = self._resolve_prefill_len_for_existing_request(req_id)
+        state = self.state_store.ensure(
+            req_id=req_id,
+            prefill_len=prefill_len,
+            protect_prefill=bool(self.config.protect_prefill),
+        )
+        if self.config.log_decisions:
+            self._logger.info(
+                "TriAttention backfilled runtime state for cached request: "
+                "req=%s prefill_len=%d",
+                req_id,
+                prefill_len,
+            )
+        return state
+
     def _supplement_worker_self_triggers(
         self,
         scheduler_output: Any,
@@ -150,9 +197,7 @@ class TriAttentionModelRunner:
                 # During prefill, Scheduler's estimated_cache_len may lag.
                 # Fall through to compute block-table-based actual_kv and
                 # replace the signal with a corrected estimate.
-            state = self.state_store.get(req_id) if hasattr(self.state_store, "get") else None
-            if state is None:
-                continue
+            state = self._ensure_state_for_existing_request(req_id)
             prefill_len = state.prefill_len
             # Compute actual KV length on the Worker side.
             # kv_from_blocks: block table already includes current step's
