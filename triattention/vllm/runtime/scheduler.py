@@ -23,6 +23,7 @@ from .kv_allocation_sync import (
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .signals import CompressionSignal
+from .thresholds import compression_length_threshold
 
 def _evict_reclaimed_block_metadata(block_pool: Any, block: Any) -> None:
     """Best-effort clear of prefix-cache metadata before reusing a block."""
@@ -90,8 +91,10 @@ def _is_ascend_scheduler_instance(scheduler: Any) -> bool:
         if "npu" in value or "ascend" in value:
             return True
     platform = getattr(vllm_config, "platform", None)
-    if platform is not None and "ascend" in repr(platform).lower():
-        return True
+    if platform is not None:
+        platform_repr = repr(platform).lower()
+        if "ascend" in platform_repr or "npu" in platform_repr:
+            return True
     return "vllm_ascend" in repr(type(scheduler))
 
 
@@ -137,9 +140,11 @@ class TriAttentionScheduler(Scheduler):
 
         logger.info(
             "TriAttentionScheduler initialized: budget=%d divide_length=%d "
-            "protect_prefill=%s kv_usage_trigger_enabled=%s block_reclaim_enabled=%s",
+            "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
+            "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s",
             self.triattention_config.kv_budget,
             self.triattention_config.divide_length,
+            self.triattention_config.min_reclaim_blocks_on_ascend,
             self.triattention_config.protect_prefill,
             self.triattention_config.enable_kv_usage_trigger,
             self.triattention_config.enable_experimental_block_reclaim,
@@ -154,10 +159,12 @@ class TriAttentionScheduler(Scheduler):
         return request.num_prompt_tokens
 
     def _compute_length_threshold(self, prefill_len: int) -> int:
-        threshold = self.triattention_config.kv_budget + self.triattention_config.divide_length
-        if self.triattention_config.protect_prefill and not self.triattention_config.include_prefill_in_budget:
-            threshold += max(0, int(prefill_len))
-        return threshold
+        return compression_length_threshold(
+            self.triattention_config,
+            prefill_len=prefill_len,
+            block_size=int(getattr(self, "block_size", 1) or 1),
+            is_ascend=_is_ascend_scheduler_instance(self),
+        )
 
     def _sync_prefill_lens(self, scheduler_output: SchedulerOutput) -> None:
         for new_req in scheduler_output.scheduled_new_reqs:
@@ -275,6 +282,7 @@ class TriAttentionScheduler(Scheduler):
                 step=self._triattention_step,
                 kv_usage=kv_usage,
                 scheduled_tokens=scheduled_tokens_i,
+                length_threshold=self._compute_length_threshold(prefill_len),
             )
             # Keep scheduler->runner side-channel sparse to reduce per-step IPC
             # metadata overhead in the common no-compression decode path.

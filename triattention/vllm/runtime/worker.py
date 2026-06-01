@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
 from .runner import TriAttentionModelRunner
+from .thresholds import compression_length_threshold, is_ascend_runtime
 
 
 def _debug_early_install_proxy_enabled() -> bool:
@@ -29,6 +30,12 @@ def _maybe_backfill_model_path(worker: Any, config: TriAttentionRuntimeConfig) -
     model_path = getattr(model_config, "model", None)
     if isinstance(model_path, str) and model_path.strip():
         config.model_path = Path(model_path.strip())
+
+
+def _get_block_size_from_model_runner(model_runner: Any) -> int | None:
+    cache_config = getattr(model_runner, "cache_config", None)
+    block_size = int(getattr(cache_config, "block_size", 0) or 0)
+    return block_size if block_size > 0 else None
 
 
 def _get_actual_kv_from_model_runner(model_runner: Any, req_id: str) -> int | None:
@@ -53,9 +60,8 @@ def _get_actual_kv_from_model_runner(model_runner: Any, req_id: str) -> int | No
     num_blocks_per_row = getattr(first_table, "num_blocks_per_row", None)
     if num_blocks_per_row is None:
         return None
-    cache_config = getattr(model_runner, "cache_config", None)
-    block_size = int(getattr(cache_config, "block_size", 0) or 0)
-    if block_size <= 0:
+    block_size = _get_block_size_from_model_runner(model_runner)
+    if block_size is None:
         return None
     return int(num_blocks_per_row[req_index]) * block_size
 
@@ -63,11 +69,16 @@ def _get_actual_kv_from_model_runner(model_runner: Any, req_id: str) -> int | No
 def _compression_threshold_for_signal(
     config: TriAttentionRuntimeConfig,
     signal: Any,
+    *,
+    block_size: int,
+    is_ascend: bool,
 ) -> int:
-    threshold = int(config.kv_budget) + int(config.divide_length)
-    if config.protect_prefill and not config.include_prefill_in_budget:
-        threshold += max(0, int(getattr(signal, "prefill_len", 0) or 0))
-    return threshold
+    return compression_length_threshold(
+        config,
+        prefill_len=max(0, int(getattr(signal, "prefill_len", 0) or 0)),
+        block_size=block_size,
+        is_ascend=is_ascend,
+    )
 
 
 def should_install_triattention_runner_proxy(
@@ -88,14 +99,20 @@ def should_install_triattention_runner_proxy(
         worker._triattention_runtime_config = config
 
     saw_trigger_without_worker_length = False
+    block_size = _get_block_size_from_model_runner(model_runner)
     for req_id, signal in signals.items():
         if not bool(getattr(signal, "should_compress", False)):
             continue
         actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
-        if actual_kv is None:
+        if actual_kv is None or block_size is None:
             saw_trigger_without_worker_length = True
             continue
-        if actual_kv >= _compression_threshold_for_signal(config, signal):
+        if actual_kv >= _compression_threshold_for_signal(
+            config,
+            signal,
+            block_size=block_size,
+            is_ascend=is_ascend_runtime(worker) or is_ascend_runtime(model_runner),
+        ):
             return True
     return saw_trigger_without_worker_length
 

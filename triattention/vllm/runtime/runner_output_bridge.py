@@ -113,8 +113,7 @@ def attach_execute_model_compression_events(
                 "triattention_compression_events",
                 pending_events,
             )
-            log_fn = logger.info if applied_count > 0 else logger.debug
-            log_fn(
+            logger.debug(
                 "attach_events: output=None, attached %d events (%d applied) to scheduler_output (id=%d)",
                 len(pending_events), applied_count, id(scheduler_output),
             )
@@ -128,7 +127,7 @@ def attach_execute_model_compression_events(
     try:
         setattr(output, "triattention_compression_events", pending_events)
         if applied_count > 0:
-            logger.info(
+            logger.debug(
                 "attach_events: attached %d events (%d applied) to output type=%s",
                 len(pending_events), applied_count, type(output).__name__,
             )

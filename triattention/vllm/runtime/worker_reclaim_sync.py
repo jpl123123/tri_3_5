@@ -108,7 +108,7 @@ def apply_worker_block_reclaim_events(
             current = int(num_blocks_per_row[req_index])
             if current > required_blocks:
                 num_blocks_per_row[req_index] = required_blocks
-                logger.info(
+                logger.debug(
                     "TriAttention worker reclaim: req=%s num_blocks %d -> %d "
                     "(cache_len_after=%d block_size=%d)",
                     req_id, current, required_blocks, cache_len_after, block_size,

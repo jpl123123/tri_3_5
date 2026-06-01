@@ -9,6 +9,7 @@ from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
 from .request_key_compat import get_scheduled_token_items
 from .signals import CompressionSignal
+from .thresholds import compression_reclaim_interval_tokens
 
 
 def effective_budget_for_signal(
@@ -226,7 +227,11 @@ def build_hook_runtime_context(
             )
 
     budget_total = effective_budget_for_signal(config, signal, effective_tokens)
-    local_length_threshold = budget_total + max(1, config.divide_length)
+    local_length_threshold = budget_total + compression_reclaim_interval_tokens(
+        config,
+        block_size=block_size_hint,
+        is_ascend=_is_ascend_runner(base_runner),
+    )
     length_gate_hit = estimated_effective_tokens >= local_length_threshold
     kv_override = str(getattr(signal, "reason", "")) == "kv_usage_threshold"
     should_defer_recompress = defer_for_prefill or (

@@ -118,6 +118,7 @@ medium generations. For latency-sensitive serving, start with:
 
 ```bash
 export TRIATTN_RUNTIME_SCORE_MAX_LAYERS=8
+export TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND=8
 export TRIATTN_RUNTIME_SPARSE_NORMALIZE_SCORES=0
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
@@ -127,6 +128,11 @@ export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 cross-layer aggregation. Use `8` as the conservative first setting, then try `4`
 if quality is stable. The runtime log will include
 `selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
+
+`TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` prevents very small compactions
+such as `2175 -> 2048` from running on NPU. With `--block-size 128`, the default
+`8` means compression waits until it can reclaim about 1024 KV tokens, which
+better amortizes scoring, KV movement, and scheduler/worker synchronization.
 
 To isolate selector overhead from the NPU attention speedup, run one benchmark
 with the recency-only selector:

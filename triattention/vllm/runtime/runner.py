@@ -29,7 +29,36 @@ from .runner_state_updates import (
 from .perf_profile import TriAttentionPerfProfile
 from .signals import CompressionSignal
 from .state import RequestStateStore
+from .thresholds import compression_length_threshold, is_ascend_runtime
 from .worker_reclaim_sync import apply_worker_block_reclaim_events
+
+
+def _resolve_tensor_parallel_rank(base_runner: Any) -> int:
+    try:
+        from vllm.distributed import get_tensor_model_parallel_rank
+
+        return int(get_tensor_model_parallel_rank())
+    except Exception:
+        pass
+    for attr_name in ("tp_rank", "tensor_parallel_rank"):
+        raw = getattr(base_runner, attr_name, None)
+        if raw is not None:
+            try:
+                return int(raw)
+            except Exception:
+                pass
+    for parallel_config in (
+        getattr(base_runner, "parallel_config", None),
+        getattr(getattr(base_runner, "vllm_config", None), "parallel_config", None),
+    ):
+        raw = getattr(parallel_config, "tensor_parallel_rank", None)
+        if raw is not None:
+            try:
+                return int(raw)
+            except Exception:
+                pass
+    return 0
+
 
 class TriAttentionModelRunner:
     """Proxy wrapper around vLLM model runner.
@@ -51,6 +80,10 @@ class TriAttentionModelRunner:
         self._last_step = 0
         self._logger = logger
         self._perf = TriAttentionPerfProfile.from_env(self._logger)
+        self._log_worker_events = (
+            bool(self.config.log_all_worker_events)
+            or _resolve_tensor_parallel_rank(base_runner) == 0
+        )
         self._pending_compression_events: list[dict[str, Any]] = []
         self._strict_no_downgrade = bool(self.config.enable_experimental_kv_compaction)
         self._runtime_input_patch_installed = False
@@ -126,6 +159,16 @@ class TriAttentionModelRunner:
         if blk_size <= 0:
             return None
         return int(num_blocks_per_row[req_index]) * blk_size
+
+    def _compression_threshold(self, prefill_len: int) -> int:
+        cache_config = getattr(self._base_runner, "cache_config", None)
+        block_size = int(getattr(cache_config, "block_size", 1) or 1)
+        return compression_length_threshold(
+            self.config,
+            prefill_len=prefill_len,
+            block_size=block_size,
+            is_ascend=is_ascend_runtime(self._base_runner),
+        )
 
     def _resolve_prefill_len_for_existing_request(self, req_id: str) -> int:
         """Best-effort prompt length lookup for requests that predate proxy state."""
@@ -219,10 +262,7 @@ class TriAttentionModelRunner:
                         actual_kv = int(getattr(req_state, "num_computed_tokens", 0))
                     else:
                         continue
-            # Threshold: budget + divide_length (same formula as Scheduler).
-            threshold = self.config.kv_budget + self.config.divide_length
-            if self.config.protect_prefill and not self.config.include_prefill_in_budget:
-                threshold += max(prefill_len, 0)
+            threshold = self._compression_threshold(prefill_len)
             if kv_from_blocks:
                 # Block table capacity already covers scheduled tokens.
                 effective_kv = actual_kv
@@ -279,6 +319,7 @@ class TriAttentionModelRunner:
             allowed_strict_skip_reasons=self._allowed_strict_skip_reasons,
             logger=self._logger,
             log_decisions=bool(self.config.log_decisions),
+            log_worker_events=bool(self._log_worker_events),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:

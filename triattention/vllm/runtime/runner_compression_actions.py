@@ -17,6 +17,7 @@ def execute_runner_compression_actions(
     allowed_strict_skip_reasons: set[str],
     logger: Any,
     log_decisions: bool,
+    log_worker_events: bool = True,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
@@ -131,7 +132,8 @@ def execute_runner_compression_actions(
             budget_total = details.get("budget_total")
             reclaimed_block_count = details.get("reclaimed_block_count")
             recent_unabsorbed_tokens = details.get("recent_unabsorbed_tokens")
-            logger.info(
+            log_fn = logger.info if log_worker_events else logger.debug
+            log_fn(
                 "TriAttention compression applied req=%s step=%d reason=%s "
                 "before=%s after=%d reclaimed_blocks=%s",
                 req_id, signal.step, result.reason,

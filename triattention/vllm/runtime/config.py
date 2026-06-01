@@ -47,6 +47,9 @@ class TriAttentionRuntimeConfig:
     score_max_layers: int = 0
     score_layer_stride: int = 1
     fast_recency_only: bool = False
+    min_reclaim_blocks: int = 1
+    min_reclaim_blocks_on_ascend: int = 8
+    log_all_worker_events: bool = False
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -158,6 +161,18 @@ class TriAttentionRuntimeConfig:
             fast_recency_only=maybe_bool(
                 "FAST_RECENCY_ONLY",
                 cls.fast_recency_only,
+            ),
+            min_reclaim_blocks=maybe_int(
+                "MIN_RECLAIM_BLOCKS",
+                cls.min_reclaim_blocks,
+            ),
+            min_reclaim_blocks_on_ascend=maybe_int(
+                "MIN_RECLAIM_BLOCKS_ON_ASCEND",
+                cls.min_reclaim_blocks_on_ascend,
+            ),
+            log_all_worker_events=maybe_bool(
+                "LOG_ALL_WORKER_EVENTS",
+                cls.log_all_worker_events,
             ),
             sparse_stats_path=Path(sparse_stats_path_raw) if sparse_stats_path_raw else None,
             model_path=Path(model_path_raw) if model_path_raw else None,
@@ -298,6 +313,16 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "score_layer_stride must be >= 1, "
                 f"got {self.score_layer_stride}"
+            )
+        if self.min_reclaim_blocks < 0:
+            raise ValueError(
+                "min_reclaim_blocks must be >= 0, "
+                f"got {self.min_reclaim_blocks}"
+            )
+        if self.min_reclaim_blocks_on_ascend < 0:
+            raise ValueError(
+                "min_reclaim_blocks_on_ascend must be >= 0, "
+                f"got {self.min_reclaim_blocks_on_ascend}"
             )
         if self.score_chunk_max_tokens < 1:
             raise ValueError(
