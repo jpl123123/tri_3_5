@@ -98,11 +98,30 @@ Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runne
 Compression events should report a status like `selector_status=enabled:torch:tp=1/2`
 when the first compression boundary is reached on NPU. The `tp=rank/size`
 suffix confirms that runtime scoring is using this worker's tensor-parallel
-head shard.
+head shard. On vLLM-Ascend with `TRIATTN_RUNTIME_SCORING_BACKEND=auto`, the
+status should say `enabled:torch`, not `enabled:triton`.
 
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression
 should happen once the prompt has finished prefill and decode starts.
+
+## Performance Tuning
+
+The default selector scores every layer to preserve the closest behavior to the
+reference algorithm. On Ascend this one-time scoring cost can dominate short or
+medium generations. For latency-sensitive serving, start with:
+
+```bash
+export TRIATTN_RUNTIME_SCORE_MAX_LAYERS=8
+export TRIATTN_RUNTIME_SPARSE_NORMALIZE_SCORES=0
+export TRIATTN_RUNTIME_PERF_PROFILE=1
+export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
+```
+
+`TRIATTN_RUNTIME_SCORE_MAX_LAYERS` uniformly samples the scoring layers before
+cross-layer aggregation. Use `8` as the conservative first setting, then try `4`
+if quality is stable. The runtime log will include
+`selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
 
 ## Calibration Stats
 

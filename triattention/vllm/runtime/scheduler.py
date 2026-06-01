@@ -81,6 +81,33 @@ def _resolve_full_prefill_len_from_request_like(request_like: Any) -> int:
     return max(candidates, default=0)
 
 
+def _is_ascend_scheduler_instance(scheduler: Any) -> bool:
+    vllm_config = getattr(scheduler, "vllm_config", None)
+    device_config = getattr(vllm_config, "device_config", None)
+    for attr_name in ("device", "device_type"):
+        raw = getattr(device_config, attr_name, None)
+        if raw is None:
+            continue
+        value = str(raw).lower()
+        if "npu" in value or "ascend" in value:
+            return True
+    platform = getattr(vllm_config, "platform", None)
+    if platform is not None and "ascend" in repr(platform).lower():
+        return True
+    return "vllm_ascend" in repr(type(scheduler))
+
+
+def _should_defer_prefill_compression_for_scheduler(scheduler: Any) -> bool:
+    cfg = getattr(scheduler, "triattention_config", None)
+    if cfg is None:
+        return False
+    if bool(getattr(cfg, "defer_prefill_compression", False)):
+        return True
+    return bool(getattr(cfg, "defer_prefill_compression_on_ascend", False)) and (
+        _is_ascend_scheduler_instance(scheduler)
+    )
+
+
 class TriAttentionScheduler(Scheduler):
     """Scheduler subclass that emits per-request compression signals."""
 
@@ -200,6 +227,17 @@ class TriAttentionScheduler(Scheduler):
             request = self.requests.get(req_id)
             if request is None:
                 continue
+            prefill_len = self._prefill_lens.get(req_id)
+            if prefill_len is None:
+                prefill_len = self._resolve_prefill_len(req_id)
+                self._prefill_lens[req_id] = prefill_len
+                self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+            if (
+                _should_defer_prefill_compression_for_scheduler(self)
+                and prefill_len > 0
+                and (int(request.num_computed_tokens) + int(scheduled_tokens)) < prefill_len
+            ):
+                continue
             has_override = self._effective_len_tracker.has_effective_len_override(req_id)
             if has_override:
                 effective_base_len = self._effective_len_tracker.observe_num_computed(
@@ -218,8 +256,6 @@ class TriAttentionScheduler(Scheduler):
                 if not kv_usage_enabled and not compression_disabled:
                     threshold = self._length_threshold_cache.get(req_id)
                     if threshold is None:
-                        prefill_len = self._resolve_prefill_len(req_id)
-                        self._prefill_lens[req_id] = prefill_len
                         threshold = self._compute_length_threshold(prefill_len)
                         self._length_threshold_cache[req_id] = threshold
                         logger.info(
@@ -232,11 +268,6 @@ class TriAttentionScheduler(Scheduler):
                     if estimated_cache_len < threshold:
                         continue
 
-            prefill_len = self._prefill_lens.get(req_id)
-            if prefill_len is None:
-                prefill_len = self._resolve_prefill_len(req_id)
-                self._prefill_lens[req_id] = prefill_len
-                self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
             signal = self._planner.build_signal(
                 req_id=req_id,
                 estimated_cache_len=estimated_cache_len,

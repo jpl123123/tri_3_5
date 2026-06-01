@@ -44,6 +44,8 @@ class TriAttentionRuntimeConfig:
     defer_prefill_compression: bool = False
     defer_prefill_compression_on_ascend: bool = True
     score_chunk_max_tokens: int = 4096
+    score_max_layers: int = 0
+    score_layer_stride: int = 1
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -143,6 +145,14 @@ class TriAttentionRuntimeConfig:
             score_chunk_max_tokens=maybe_int(
                 "SCORE_CHUNK_MAX_TOKENS",
                 cls.score_chunk_max_tokens,
+            ),
+            score_max_layers=maybe_int(
+                "SCORE_MAX_LAYERS",
+                cls.score_max_layers,
+            ),
+            score_layer_stride=maybe_int(
+                "SCORE_LAYER_STRIDE",
+                cls.score_layer_stride,
             ),
             sparse_stats_path=Path(sparse_stats_path_raw) if sparse_stats_path_raw else None,
             model_path=Path(model_path_raw) if model_path_raw else None,
@@ -273,6 +283,16 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "effective_len_guard_divide_multiples must be >= 1, "
                 f"got {self.effective_len_guard_divide_multiples}"
+            )
+        if self.score_max_layers < 0:
+            raise ValueError(
+                "score_max_layers must be >= 0, "
+                f"got {self.score_max_layers}"
+            )
+        if self.score_layer_stride < 1:
+            raise ValueError(
+                "score_layer_stride must be >= 1, "
+                f"got {self.score_layer_stride}"
             )
         if self.score_chunk_max_tokens < 1:
             raise ValueError(

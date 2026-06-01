@@ -124,9 +124,36 @@ def build_triattention_selector(
 
     effective_device = _resolve_effective_device()
     device_type = effective_device.type if effective_device is not None else None
+    def _is_ascend_runner() -> bool:
+        if base_runner is None:
+            return False
+        module_name = type(base_runner).__module__
+        if isinstance(module_name, str) and module_name.startswith("vllm_ascend."):
+            return True
+        runner_repr = repr(type(base_runner)).lower()
+        if "vllm_ascend" in runner_repr:
+            return True
+        device_config = getattr(base_runner, "device_config", None)
+        vllm_device_config = getattr(
+            getattr(base_runner, "vllm_config", None),
+            "device_config",
+            None,
+        )
+        for candidate in (device_config, vllm_device_config):
+            for attr_name in ("device", "device_type"):
+                raw = getattr(candidate, attr_name, None)
+                if raw is None:
+                    continue
+                value = str(raw).lower()
+                if "npu" in value or "ascend" in value:
+                    return True
+        return False
+
+    is_ascend_runner = _is_ascend_runner()
     scoring_backend = getattr(config, "scoring_backend", "auto").strip().lower()
     use_torch_scoring = scoring_backend in {"torch", "pytorch"} or (
-        scoring_backend == "auto" and device_type not in {None, "cuda"}
+        scoring_backend == "auto"
+        and (is_ascend_runner or device_type not in {None, "cuda"})
     )
     score_backend_name = "torch" if use_torch_scoring else "triton"
 
@@ -170,6 +197,43 @@ def build_triattention_selector(
         return 0, 1
 
     tp_rank, tp_size = _resolve_tensor_parallel_info()
+    score_max_layers = max(0, int(getattr(config, "score_max_layers", 0) or 0))
+    score_layer_stride = max(1, int(getattr(config, "score_layer_stride", 1) or 1))
+
+    def _pick_uniform_entries(entries: list[Any], limit: int) -> list[Any]:
+        if limit <= 0 or len(entries) <= limit:
+            return entries
+        if limit == 1:
+            return [entries[-1]]
+        last = len(entries) - 1
+        positions: list[int] = []
+        seen: set[int] = set()
+        for i in range(limit):
+            pos = int(round((i * last) / float(limit - 1)))
+            if pos not in seen:
+                positions.append(pos)
+                seen.add(pos)
+        # Rounding can duplicate positions for very small lists; fill from the
+        # tail because later layers tend to be more task-specific.
+        pos = last
+        while len(positions) < limit and pos >= 0:
+            if pos not in seen:
+                positions.append(pos)
+                seen.add(pos)
+            pos -= 1
+        return [entries[pos] for pos in sorted(positions[:limit])]
+
+    def _filter_layer_entries_for_scoring(entries: list[Any]) -> list[Any]:
+        if not entries:
+            return entries
+        filtered = [
+            entry
+            for pos, entry in enumerate(entries)
+            if pos % score_layer_stride == 0
+        ]
+        if not filtered:
+            filtered = [entries[-1]]
+        return _pick_uniform_entries(filtered, score_max_layers)
 
     tri_cfg = TriAttentionConfig(
         stats_path=stats_path,
@@ -979,6 +1043,8 @@ def build_triattention_selector(
             layer_entries = list(iter_inputs)
             if not layer_entries:
                 return None
+            total_layer_entries = len(layer_entries)
+            layer_entries = _filter_layer_entries_for_scoring(layer_entries)
             k = min(budget_total, total_tokens)
             if k <= 0:
                 return {"mode": "per_head", "indices": []}
@@ -1188,9 +1254,12 @@ def build_triattention_selector(
                 "semantic": "hf_aligned_global_per_head",
                 "group_agg_mode": group_agg_mode,
                 "debug_group_layer_indices": prepared_layer_indices,
+                "debug_group_layer_count_total": total_layer_entries,
                 "debug_recent_count": _resolve_effective_recent_count(total_tokens),
             }
         else:
+            if iter_mode in {"dense_iter", "dense_list"}:
+                iter_inputs = _filter_layer_entries_for_scoring(list(iter_inputs))
             aggregated_scores: torch.Tensor | None = None
             layer_count = 0
             dense_layer_indices: list[int] = []
@@ -1234,13 +1303,17 @@ def build_triattention_selector(
                 "semantic": "hf_aligned_global_per_head",
                 "group_agg_mode": "mean",
                 "debug_group_layer_indices": dense_layer_indices,
+                "debug_group_layer_count_total": len(dense_layer_indices),
                 "debug_recent_count": _resolve_effective_recent_count(total_tokens),
             }
 
     setattr(_select_keep_indices, "_supports_paged", True)
     setattr(_select_keep_indices_for_group_per_head, "_supports_paged_group", True)
+    layer_filter_status = (
+        f":score_layers=max{score_max_layers or 'all'},stride{score_layer_stride}"
+    )
     return (
         _select_keep_indices,
         _select_keep_indices_for_group_per_head,
-        f"enabled:{score_backend_name}:tp={tp_rank}/{tp_size}",
+        f"enabled:{score_backend_name}:tp={tp_rank}/{tp_size}{layer_filter_status}",
     )
