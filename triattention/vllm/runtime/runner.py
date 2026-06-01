@@ -165,7 +165,7 @@ class TriAttentionModelRunner:
             protect_prefill=bool(self.config.protect_prefill),
         )
         if self.config.log_decisions:
-            self._logger.info(
+            self._logger.debug(
                 "TriAttention backfilled runtime state for cached request: "
                 "req=%s prefill_len=%d",
                 req_id,
@@ -191,13 +191,6 @@ class TriAttentionModelRunner:
             # If Scheduler already sent a trigger, check if we should
             # override it with a more accurate block-table-based estimate.
             existing = signals.get(req_id)
-            if existing is not None and existing.should_compress:
-                # During decode, Scheduler's signal is fine — skip.
-                if int(getattr(existing, "scheduled_tokens", 1)) <= 1:
-                    continue
-                # During prefill, Scheduler's estimated_cache_len may lag.
-                # Fall through to compute block-table-based actual_kv and
-                # replace the signal with a corrected estimate.
             state = self._ensure_state_for_existing_request(req_id)
             prefill_len = state.prefill_len
             # Compute actual KV length on the Worker side.
@@ -236,13 +229,28 @@ class TriAttentionModelRunner:
             else:
                 effective_kv = actual_kv + max(1, int(scheduled_tokens))
             if effective_kv < threshold:
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                    self._logger.debug(
+                        "TriAttention dropped stale scheduler trigger below "
+                        "worker threshold: req=%s actual_kv=%d effective_kv=%d "
+                        "threshold=%d scheduled=%d from_blocks=%s",
+                        req_id, actual_kv, effective_kv, threshold,
+                        scheduled_tokens, kv_from_blocks,
+                    )
+                continue
+            if (
+                existing is not None
+                and existing.should_compress
+                and int(getattr(existing, "scheduled_tokens", 1)) <= 1
+            ):
                 continue
             self._logger.info(
                 "TriAttention worker self-trigger: req=%s actual_kv=%d "
                 "effective_kv=%d scheduled=%d threshold=%d "
-                "from_blocks=%s (scheduler had no signal)",
+                "from_blocks=%s scheduler_had_signal=%s",
                 req_id, actual_kv, effective_kv, scheduled_tokens,
-                threshold, kv_from_blocks,
+                threshold, kv_from_blocks, bool(existing),
             )
             signals[req_id] = CompressionSignal(
                 req_id=req_id,

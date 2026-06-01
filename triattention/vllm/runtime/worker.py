@@ -31,6 +31,75 @@ def _maybe_backfill_model_path(worker: Any, config: TriAttentionRuntimeConfig) -
         config.model_path = Path(model_path.strip())
 
 
+def _get_actual_kv_from_model_runner(model_runner: Any, req_id: str) -> int | None:
+    input_batch = getattr(model_runner, "input_batch", None)
+    if input_batch is None:
+        return None
+    req_id_to_index = getattr(input_batch, "req_id_to_index", None)
+    if not isinstance(req_id_to_index, dict):
+        return None
+    req_index = req_id_to_index.get(req_id)
+    if not isinstance(req_index, int):
+        return None
+    block_table_obj = getattr(input_batch, "block_table", None)
+    if block_table_obj is None:
+        return None
+    inner_tables = getattr(block_table_obj, "block_tables", None)
+    first_table = (
+        inner_tables[0]
+        if isinstance(inner_tables, list) and inner_tables
+        else block_table_obj
+    )
+    num_blocks_per_row = getattr(first_table, "num_blocks_per_row", None)
+    if num_blocks_per_row is None:
+        return None
+    cache_config = getattr(model_runner, "cache_config", None)
+    block_size = int(getattr(cache_config, "block_size", 0) or 0)
+    if block_size <= 0:
+        return None
+    return int(num_blocks_per_row[req_index]) * block_size
+
+
+def _compression_threshold_for_signal(
+    config: TriAttentionRuntimeConfig,
+    signal: Any,
+) -> int:
+    threshold = int(config.kv_budget) + int(config.divide_length)
+    if config.protect_prefill and not config.include_prefill_in_budget:
+        threshold += max(0, int(getattr(signal, "prefill_len", 0) or 0))
+    return threshold
+
+
+def should_install_triattention_runner_proxy(
+    worker: Any,
+    scheduler_output: Any,
+) -> bool:
+    """Avoid installing the proxy for stale scheduler triggers below budget."""
+    signals = getattr(scheduler_output, "triattention_signals", None)
+    if not signals:
+        return False
+    if getattr(worker, "_triattention_runner_proxy_installed", False):
+        return True
+
+    model_runner = getattr(worker, "model_runner", None)
+    config = getattr(worker, "_triattention_runtime_config", None)
+    if config is None:
+        config = TriAttentionRuntimeConfig.from_env()
+        worker._triattention_runtime_config = config
+
+    saw_trigger_without_worker_length = False
+    for req_id, signal in signals.items():
+        if not bool(getattr(signal, "should_compress", False)):
+            continue
+        actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
+        if actual_kv is None:
+            saw_trigger_without_worker_length = True
+            continue
+        if actual_kv >= _compression_threshold_for_signal(config, signal):
+            return True
+    return saw_trigger_without_worker_length
+
+
 class TriAttentionWorker(VLLMGPUWorker):
     """GPU worker that injects TriAttention model-runner proxy."""
 
@@ -84,8 +153,7 @@ class TriAttentionWorker(VLLMGPUWorker):
     def execute_model(self, scheduler_output):  # type: ignore[override]
         # Sparse scheduler signals are empty in the common pre-trigger path.
         # Install the proxy only when TriAttention behavior is actually needed.
-        signals = getattr(scheduler_output, "triattention_signals", None)
-        if signals:
+        if should_install_triattention_runner_proxy(self, scheduler_output):
             self._ensure_triattention_runner_proxy()
         super_execute_model = getattr(super(), "execute_model", None)
         if not callable(super_execute_model):

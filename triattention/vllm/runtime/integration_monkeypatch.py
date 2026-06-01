@@ -23,7 +23,11 @@ from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .scheduler import TriAttentionScheduler
 from .signals import CompressionSignal
-from .worker import TriAttentionWorker, _debug_early_install_proxy_enabled
+from .worker import (
+    TriAttentionWorker,
+    _debug_early_install_proxy_enabled,
+    should_install_triattention_runner_proxy,
+)
 
 _PATCHED = False
 _PATCHED_SCHEDULER_ACTIVE = False
@@ -236,10 +240,11 @@ def _patched_worker_init_device(self):
 
 def _patched_worker_execute_model(self, scheduler_output):
     assert _ORIG_WORKER_EXECUTE_MODEL is not None
-    if _PATCHED_WORKER_ACTIVE:
-        signals = getattr(scheduler_output, "triattention_signals", None)
-        if signals:
-            TriAttentionWorker._ensure_triattention_runner_proxy(self)
+    if _PATCHED_WORKER_ACTIVE and should_install_triattention_runner_proxy(
+        self,
+        scheduler_output,
+    ):
+        TriAttentionWorker._ensure_triattention_runner_proxy(self)
     return _ORIG_WORKER_EXECUTE_MODEL(self, scheduler_output)
 
 
@@ -260,10 +265,11 @@ def _patched_ascend_worker_init_device(self):
 
 
 def _patched_ascend_worker_execute_model(self, scheduler_output):
-    if _PATCHED_WORKER_ACTIVE:
-        signals = getattr(scheduler_output, "triattention_signals", None)
-        if signals:
-            TriAttentionWorker._ensure_triattention_runner_proxy(self)
+    if _PATCHED_WORKER_ACTIVE and should_install_triattention_runner_proxy(
+        self,
+        scheduler_output,
+    ):
+        TriAttentionWorker._ensure_triattention_runner_proxy(self)
     return _resolve_original_ascend_worker_method(self, "execute_model")(
         self,
         scheduler_output,

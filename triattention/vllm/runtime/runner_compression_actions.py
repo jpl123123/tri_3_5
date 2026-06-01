@@ -36,7 +36,7 @@ def execute_runner_compression_actions(
             compression_count = int(getattr(req_state, "compression_count", 0) or 0)
             sched_tokens = int(getattr(signal, "scheduled_tokens", 1))
             if compression_count > 0 and last_step >= 0 and signal.step - last_step <= 1 and sched_tokens <= 1:
-                logger.info(
+                logger.debug(
                     "TriAttention compression skipped (batch-queue dedup) "
                     "req=%s step=%d last_compression_step=%d",
                     req_id, signal.step, last_step,
@@ -206,7 +206,12 @@ def execute_runner_compression_actions(
             reason=result.reason,
             step=signal.step,
         )
-        logger.info(
+        skip_logger = (
+            logger.debug
+            if result.reason in {"under_budget", "defer_recompress", "batch_queue_dedup"}
+            else logger.info
+        )
+        skip_logger(
             "TriAttention compression skipped req=%s step=%d reason=%s "
             "cache_len_after=%s details=%s",
             req_id,
