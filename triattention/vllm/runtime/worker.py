@@ -16,7 +16,11 @@ except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
 from .runner import TriAttentionModelRunner
-from .thresholds import compression_length_threshold, is_ascend_runtime
+from .thresholds import (
+    compression_length_threshold,
+    is_ascend_environment_available,
+    is_ascend_runtime,
+)
 
 
 def _debug_early_install_proxy_enabled() -> bool:
@@ -98,10 +102,23 @@ def should_install_triattention_runner_proxy(
         config = TriAttentionRuntimeConfig.from_env()
         worker._triattention_runtime_config = config
 
+    defer_chunked_prefill = bool(getattr(config, "defer_prefill_compression", False))
+    if not defer_chunked_prefill and bool(
+        getattr(config, "defer_prefill_compression_on_ascend", False)
+    ):
+        defer_chunked_prefill = (
+            is_ascend_runtime(worker)
+            or is_ascend_runtime(model_runner)
+            or is_ascend_environment_available()
+        )
+
     saw_trigger_without_worker_length = False
     block_size = _get_block_size_from_model_runner(model_runner)
     for req_id, signal in signals.items():
         if not bool(getattr(signal, "should_compress", False)):
+            continue
+        scheduled_tokens = max(1, int(getattr(signal, "scheduled_tokens", 1) or 1))
+        if defer_chunked_prefill and scheduled_tokens > 1:
             continue
         actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
         if actual_kv is None or block_size is None:

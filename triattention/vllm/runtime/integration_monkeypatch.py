@@ -23,6 +23,7 @@ from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .scheduler import TriAttentionScheduler
 from .signals import CompressionSignal
+from .thresholds import is_ascend_environment_available
 from .worker import (
     TriAttentionWorker,
     _debug_early_install_proxy_enabled,
@@ -40,6 +41,7 @@ _ORIG_WORKER_EXECUTE_MODEL: Callable[..., Any] | None = None
 _ORIG_ASCEND_WORKER_METHODS: dict[type, dict[str, Callable[..., Any]]] = {}
 _ORIG_KVCACHE_ALLOCATE_SLOTS: Callable[..., Any] | None = None
 _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE: Callable[..., Any] | None = None
+_DEFER_PREFILL_BOUNDARY_CACHE: bool | None = None
 
 
 def _maybe_rewrite_v2_output_req_map(scheduler_output: Any, model_runner_output: Any) -> None:
@@ -205,7 +207,12 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
             source = "scheduler_output"
     if compression_events:
         applied = [e for e in compression_events if e.get("status") == "applied"]
-        logger.info(
+        log_fn = (
+            logger.info
+            if applied and bool(getattr(cfg, "log_decisions", False))
+            else logger.debug
+        )
+        log_fn(
             "TriAttention update_from_output: received %d events (%d applied) via %s",
             len(compression_events), len(applied), source,
         )
@@ -390,7 +397,28 @@ def _scheduler_output_has_compression_boundary(scheduler_output: Any) -> bool:
     signals = getattr(scheduler_output, "triattention_signals", None)
     if not isinstance(signals, dict) or not signals:
         return False
-    return any(bool(getattr(sig, "should_compress", False)) for sig in signals.values())
+    for sig in signals.values():
+        if not bool(getattr(sig, "should_compress", False)):
+            continue
+        scheduled_tokens = max(1, int(getattr(sig, "scheduled_tokens", 1) or 1))
+        if scheduled_tokens > 1 and _should_defer_prefill_boundary():
+            continue
+        return True
+    return False
+
+
+def _should_defer_prefill_boundary() -> bool:
+    global _DEFER_PREFILL_BOUNDARY_CACHE
+    if _DEFER_PREFILL_BOUNDARY_CACHE is not None:
+        return _DEFER_PREFILL_BOUNDARY_CACHE
+    cfg = TriAttentionRuntimeConfig.from_env()
+    _DEFER_PREFILL_BOUNDARY_CACHE = bool(
+        getattr(cfg, "defer_prefill_compression", False)
+    ) or (
+        bool(getattr(cfg, "defer_prefill_compression_on_ascend", False))
+        and is_ascend_environment_available()
+    )
+    return _DEFER_PREFILL_BOUNDARY_CACHE
 
 
 def _batch_queue_has_pending_compression_boundary(batch_queue: Any) -> bool:

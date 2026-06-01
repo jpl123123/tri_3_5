@@ -2,9 +2,47 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
 
 from .config import TriAttentionRuntimeConfig
+
+
+_ASCEND_ENV_CACHE = False
+
+
+def is_ascend_environment_available() -> bool:
+    """Best-effort detect vLLM-Ascend when scheduler classes stay upstream."""
+    global _ASCEND_ENV_CACHE
+    if _ASCEND_ENV_CACHE:
+        return True
+    if any(
+        name == "vllm_ascend" or name.startswith("vllm_ascend.")
+        for name in sys.modules
+    ):
+        _ASCEND_ENV_CACHE = True
+        return True
+    for env_name in (
+        "ASCEND_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "NPU_VISIBLE_DEVICES",
+        "VLLM_TARGET_DEVICE",
+        "DEVICE_TARGET",
+    ):
+        raw = os.environ.get(env_name)
+        if not raw:
+            continue
+        value = raw.strip().lower()
+        if not value or value in {"-1", "none", "cpu"}:
+            continue
+        if "ascend" in value or "npu" in value:
+            _ASCEND_ENV_CACHE = True
+            return True
+        if "ascend" in env_name.lower() or "npu" in env_name.lower():
+            _ASCEND_ENV_CACHE = True
+            return True
+    return False
 
 
 def is_ascend_runtime(obj: Any) -> bool:
@@ -24,7 +62,7 @@ def is_ascend_runtime(obj: Any) -> bool:
             value = str(raw).lower()
             if "npu" in value or "ascend" in value:
                 return True
-    return False
+    return is_ascend_environment_available()
 
 
 def compression_reclaim_interval_tokens(

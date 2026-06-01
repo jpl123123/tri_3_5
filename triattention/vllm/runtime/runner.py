@@ -29,7 +29,11 @@ from .runner_state_updates import (
 from .perf_profile import TriAttentionPerfProfile
 from .signals import CompressionSignal
 from .state import RequestStateStore
-from .thresholds import compression_length_threshold, is_ascend_runtime
+from .thresholds import (
+    compression_length_threshold,
+    is_ascend_environment_available,
+    is_ascend_runtime,
+)
 from .worker_reclaim_sync import apply_worker_block_reclaim_events
 
 
@@ -170,6 +174,13 @@ class TriAttentionModelRunner:
             is_ascend=is_ascend_runtime(self._base_runner),
         )
 
+    def _should_defer_chunked_prefill_compression(self) -> bool:
+        if bool(getattr(self.config, "defer_prefill_compression", False)):
+            return True
+        if not bool(getattr(self.config, "defer_prefill_compression_on_ascend", False)):
+            return False
+        return is_ascend_runtime(self._base_runner) or is_ascend_environment_available()
+
     def _resolve_prefill_len_for_existing_request(self, req_id: str) -> int:
         """Best-effort prompt length lookup for requests that predate proxy state."""
         candidates: list[int] = []
@@ -230,10 +241,28 @@ class TriAttentionModelRunner:
         if not self.config.enable_experimental_kv_compaction:
             return signals
         scheduled_items = get_scheduled_token_items(scheduler_output)
+        defer_chunked_prefill = self._should_defer_chunked_prefill_compression()
         for _raw_key, req_id, scheduled_tokens in scheduled_items:
+            scheduled_tokens_i = max(1, int(scheduled_tokens))
             # If Scheduler already sent a trigger, check if we should
             # override it with a more accurate block-table-based estimate.
             existing = signals.get(req_id)
+            if defer_chunked_prefill and scheduled_tokens_i > 1:
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                    if hasattr(self.state_store, "mark_compression_skipped"):
+                        self.state_store.mark_compression_skipped(
+                            req_id=req_id,
+                            reason="defer_prefill",
+                            step=self._last_step,
+                        )
+                    self._logger.debug(
+                        "TriAttention dropped chunked-prefill trigger: "
+                        "req=%s scheduled=%d",
+                        req_id,
+                        scheduled_tokens_i,
+                    )
+                continue
             state = self._ensure_state_for_existing_request(req_id)
             prefill_len = state.prefill_len
             # Compute actual KV length on the Worker side.
@@ -267,10 +296,16 @@ class TriAttentionModelRunner:
                 # Block table capacity already covers scheduled tokens.
                 effective_kv = actual_kv
             else:
-                effective_kv = actual_kv + max(1, int(scheduled_tokens))
+                effective_kv = actual_kv + scheduled_tokens_i
             if effective_kv < threshold:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
+                    if hasattr(self.state_store, "mark_compression_skipped"):
+                        self.state_store.mark_compression_skipped(
+                            req_id=req_id,
+                            reason="below_worker_threshold",
+                            step=self._last_step,
+                        )
                     self._logger.debug(
                         "TriAttention dropped stale scheduler trigger below "
                         "worker threshold: req=%s actual_kv=%d effective_kv=%d "
@@ -301,7 +336,7 @@ class TriAttentionModelRunner:
                 kv_usage=None,
                 protect_prefill=self.config.protect_prefill,
                 prefill_len=prefill_len,
-                scheduled_tokens=max(1, int(scheduled_tokens)),
+                scheduled_tokens=scheduled_tokens_i,
             )
         return signals
 
@@ -397,7 +432,7 @@ class TriAttentionModelRunner:
                     for g in new_block_ids
                 )
                 new_block_ids_list[i] = trimmed
-                self._logger.info(
+                self._logger.debug(
                     "TriAttention patched new_block_ids: req=%s "
                     "current_blocks=%d max=%d new_trimmed=%d->%d",
                     req_id, current, max_blocks, max_new, available,

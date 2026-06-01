@@ -23,7 +23,7 @@ from .kv_allocation_sync import (
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .signals import CompressionSignal
-from .thresholds import compression_length_threshold
+from .thresholds import compression_length_threshold, is_ascend_environment_available
 
 def _evict_reclaimed_block_metadata(block_pool: Any, block: Any) -> None:
     """Best-effort clear of prefix-cache metadata before reusing a block."""
@@ -95,7 +95,7 @@ def _is_ascend_scheduler_instance(scheduler: Any) -> bool:
         platform_repr = repr(platform).lower()
         if "ascend" in platform_repr or "npu" in platform_repr:
             return True
-    return "vllm_ascend" in repr(type(scheduler))
+    return "vllm_ascend" in repr(type(scheduler)) or is_ascend_environment_available()
 
 
 def _should_defer_prefill_compression_for_scheduler(scheduler: Any) -> bool:
@@ -240,9 +240,7 @@ class TriAttentionScheduler(Scheduler):
                 self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
             if (
                 _should_defer_prefill_compression_for_scheduler(self)
-                and prefill_len > 0
                 and scheduled_tokens_i > 1
-                and (int(request.num_computed_tokens) + scheduled_tokens_i) < prefill_len
             ):
                 continue
             has_override = self._effective_len_tracker.has_effective_len_override(req_id)
@@ -293,7 +291,12 @@ class TriAttentionScheduler(Scheduler):
             #    effective-length updates for runtime input overrides.
             if signal.should_compress or has_override:
                 if signal.should_compress:
-                    logger.info(
+                    log_fn = (
+                        logger.info
+                        if bool(self.triattention_config.log_decisions)
+                        else logger.debug
+                    )
+                    log_fn(
                         "TriAttention signal triggered req=%s step=%d "
                         "estimated_cache_len=%d reason=%s",
                         req_id, self._triattention_step,
@@ -380,7 +383,7 @@ class TriAttentionScheduler(Scheduler):
         block_size = int(getattr(self, "block_size", 1))
         if block_size <= 0:
             block_size = 1
-        logger.info(
+        logger.debug(
             "TriAttention _apply_compression_events: kv_cache_manager=%s "
             "coordinator=%s managers=%s block_size=%d reclaim_enabled=%s",
             type(self.kv_cache_manager).__name__,
@@ -436,7 +439,7 @@ class TriAttentionScheduler(Scheduler):
                 if isinstance(block_reclaim, dict)
                 else None
             )
-            logger.info(
+            logger.debug(
                 "TriAttention block reclaim: req=%s required_blocks=%d "
                 "expected_shrink_gids=%s block_reclaim=%s groups=%s",
                 req_id, required_blocks, expected_shrink_gids,
@@ -456,7 +459,7 @@ class TriAttentionScheduler(Scheduler):
                 # blocks from new ones — skip synthesis to avoid freeing
                 # blocks the worker is still using.
                 if _evt_scheduled > 1:
-                    logger.info(
+                    logger.debug(
                         "TriAttention block reclaim: skipping synthesized "
                         "reclaim during prefill (no groups, "
                         "scheduled_tokens=%d) req=%s",
@@ -557,7 +560,7 @@ class TriAttentionScheduler(Scheduler):
                         manager.num_cached_block[req_id], len(reassembled)
                     )
                 if removed_old_blocks:
-                    logger.info(
+                    logger.debug(
                         "TriAttention scheduler FREE_BLOCKS: req=%s gid=%d "
                         "freed=%d kept=%d new=%d",
                         req_id, gid, len(removed_old_blocks),
@@ -589,7 +592,7 @@ class TriAttentionScheduler(Scheduler):
                     if _free_reclaimed_blocks(manager, removed_blocks):
                         reclaim_applied_any = True
             elif missing_gids and _evt_scheduled > 1:
-                logger.info(
+                logger.debug(
                     "TriAttention block reclaim: skipping synthesized "
                     "reclaim for missing gids %s during prefill "
                     "(scheduled_tokens=%d) req=%s",

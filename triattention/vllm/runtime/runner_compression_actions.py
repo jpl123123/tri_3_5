@@ -48,18 +48,6 @@ def execute_runner_compression_actions(
                         reason="batch_queue_dedup",
                         step=signal.step,
                     )
-                events.append(
-                    {
-                        "req_id": req_id,
-                        "step": signal.step,
-                        "status": "skipped",
-                        "reason": "batch_queue_dedup",
-                        "cache_len_after": getattr(req_state, "current_cache_len", None),
-                        "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                        "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
-                        "prefill_len": int(getattr(signal, "prefill_len", 0)),
-                    }
-                )
                 continue
         try:
             result = executor.execute(
@@ -221,23 +209,5 @@ def execute_runner_compression_actions(
             result.reason,
             result.cache_len_after,
             result.details,
-        )
-        events.append(
-            {
-                "req_id": req_id,
-                "step": signal.step,
-                "status": "skipped",
-                "reason": result.reason,
-                "cache_len_after": result.cache_len_after,
-                "details": result.details,
-                "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
-                "prefill_len": int(getattr(signal, "prefill_len", 0)),
-                "block_reclaim": (
-                    result.details.get("block_reclaim")
-                    if isinstance(result.details, dict)
-                    else None
-                ),
-            }
         )
     return events
