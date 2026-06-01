@@ -41,6 +41,8 @@ class TriAttentionRuntimeConfig:
     fail_on_effective_len_regression: bool = True
     effective_len_regression_ratio: float = 0.9
     effective_len_guard_divide_multiples: int = 2
+    defer_prefill_compression: bool = False
+    defer_prefill_compression_on_ascend: bool = True
     score_chunk_max_tokens: int = 4096
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
@@ -129,6 +131,14 @@ class TriAttentionRuntimeConfig:
             effective_len_guard_divide_multiples=maybe_int(
                 "EFFECTIVE_LEN_GUARD_DIVIDE_MULTIPLES",
                 cls.effective_len_guard_divide_multiples,
+            ),
+            defer_prefill_compression=maybe_bool(
+                "DEFER_PREFILL_COMPRESSION",
+                cls.defer_prefill_compression,
+            ),
+            defer_prefill_compression_on_ascend=maybe_bool(
+                "DEFER_PREFILL_COMPRESSION_ON_ASCEND",
+                cls.defer_prefill_compression_on_ascend,
             ),
             score_chunk_max_tokens=maybe_int(
                 "SCORE_CHUNK_MAX_TOKENS",

@@ -92,6 +92,13 @@ def min_block_capacity_tokens(
     return min(capacities)
 
 
+def _is_ascend_runner(base_runner: Any) -> bool:
+    module_name = type(base_runner).__module__
+    if isinstance(module_name, str) and module_name.startswith("vllm_ascend."):
+        return True
+    return "vllm_ascend" in repr(type(base_runner))
+
+
 @dataclass(frozen=True)
 class HookRuntimeContext:
     scheduled_tokens: int
@@ -101,6 +108,7 @@ class HookRuntimeContext:
     budget_total: int
     recent_unabsorbed_tokens: int | None
     should_defer_recompress: bool
+    defer_reason: str | None = None
 
 
 def build_hook_runtime_context(
@@ -164,6 +172,18 @@ def build_hook_runtime_context(
     prefill_len = int(getattr(signal, "prefill_len", 0) or 0)
     prefill_incomplete = prefill_len > 0 and num_computed_tokens < prefill_len
 
+    defer_for_prefill = (
+        config.enable_experimental_kv_compaction
+        and prefill_incomplete
+        and (
+            bool(getattr(config, "defer_prefill_compression", False))
+            or (
+                bool(getattr(config, "defer_prefill_compression_on_ascend", False))
+                and _is_ascend_runner(base_runner)
+            )
+        )
+    )
+
     if (
         config.fail_on_effective_len_regression
         and config.enable_experimental_block_reclaim
@@ -188,12 +208,13 @@ def build_hook_runtime_context(
     local_length_threshold = budget_total + max(1, config.divide_length)
     length_gate_hit = estimated_effective_tokens >= local_length_threshold
     kv_override = str(getattr(signal, "reason", "")) == "kv_usage_threshold"
-    should_defer_recompress = (
+    should_defer_recompress = defer_for_prefill or (
         config.enable_experimental_kv_compaction
         and req_id in compressed_once
         and not kv_override
         and not length_gate_hit
     )
+    defer_reason = "prefill_incomplete" if defer_for_prefill else None
     return HookRuntimeContext(
         scheduled_tokens=int(scheduled_tokens),
         num_computed_tokens=int(num_computed_tokens),
@@ -206,4 +227,5 @@ def build_hook_runtime_context(
             else None
         ),
         should_defer_recompress=bool(should_defer_recompress),
+        defer_reason=defer_reason,
     )

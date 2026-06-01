@@ -75,7 +75,11 @@ def execute_base_model_with_effective_overrides(
         )
         if perf_enabled:
             t3 = time.perf_counter()
-        if getattr(base_runner, "req_states", None) is not None or debug_v1_override_path_enabled():
+        if (
+            getattr(base_runner, "req_states", None) is not None
+            or getattr(base_runner, "input_batch", None) is not None
+            or debug_v1_override_path_enabled()
+        ):
             assert_effective_overrides_consumed()
         if perf_enabled:
             perf_out["override_prep_ms"] = (t1 - t0) * 1000.0

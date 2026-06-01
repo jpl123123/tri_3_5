@@ -93,7 +93,13 @@ def make_runner_compression_hook(
         budget_total = runtime_ctx.budget_total
         recent_unabsorbed_tokens = runtime_ctx.recent_unabsorbed_tokens
         should_defer_recompress = runtime_ctx.should_defer_recompress
-        if effective_tokens <= budget_total or should_defer_recompress:
+        if should_defer_recompress:
+            return {
+                "applied": False,
+                "reason": runtime_ctx.defer_reason or "defer_recompress",
+                "cache_len_after": effective_tokens,
+            }
+        if effective_tokens <= budget_total:
             return {
                 "applied": False,
                 "reason": "under_budget",

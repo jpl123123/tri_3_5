@@ -254,6 +254,7 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_SCORING_BACKEND` | `auto` | Scoring backend (`auto`, `triton`, `torch`/`pytorch`); `auto` uses PyTorch/torch_npu on vLLM-Ascend |
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
+| `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND` | `true` | On vLLM-Ascend, wait until full prompt prefill finishes before first KV compaction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_KV_COMPACTION` | `true` | Enable in-place KV cache compaction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_BLOCK_RECLAIM` | `true` | Enable freed block reclamation |
 | `ENABLE_TRIATTENTION` | `true` | Master switch to enable/disable the plugin |

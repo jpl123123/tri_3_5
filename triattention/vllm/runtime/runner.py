@@ -54,6 +54,8 @@ class TriAttentionModelRunner:
         self._runtime_input_patch_installed = False
         self._allowed_strict_skip_reasons = {
             "under_budget",
+            "prefill_incomplete",
+            "defer_recompress",
             "prefill_exceeds_budget",
             "req_state_not_found",
             "batch_queue_dedup",

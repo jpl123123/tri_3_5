@@ -1,10 +1,14 @@
 # vLLM-Ascend Integration
 
 TriAttention can run through vLLM-Ascend by using the same runtime scheduler and
-KV compaction path as the CUDA vLLM backend, with two Ascend-specific changes:
+KV compaction path as the CUDA vLLM backend, with three Ascend-specific changes:
 
 - `vllm_ascend.worker.worker.NPUWorker` is patched so the TriAttention model
   runner proxy is installed after the NPU model runner is created.
+- vLLM-Ascend input preparation is patched so compressed KV length is reflected
+  in NPU `seq_lens`, CPU `seq_lens_np`, and slot mappings. Without this,
+  attention metadata can keep reading the original long context after KV has
+  already been compacted, which commonly shows up as repeated tokens.
 - NPU execution defaults to PyTorch/torch_npu scoring instead of the CUDA
   Triton scoring kernel.
 
@@ -37,6 +41,7 @@ export TRIATTN_RUNTIME_SPARSE_STATS_PATH=/path/to/model_stats.pt
 export TRIATTN_RUNTIME_KV_BUDGET=2048
 export TRIATTN_RUNTIME_DIVIDE_LENGTH=128
 export TRIATTN_RUNTIME_WINDOW_SIZE=128
+export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=1
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -57,6 +62,11 @@ Recommended first-run settings:
   original prefix-cache block hashes.
 - Keep `--max-num-batched-tokens` modest so prefill chunks do not overshoot the
   KV budget before the compression boundary is reached.
+- On Ascend, `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=1` is the
+  default. Compression is first applied after the full prompt prefill has
+  completed, which is the most stable mode for long prompts on NPU attention
+  backends. Set it to `0` only after validating streaming prefill compression on
+  your vLLM-Ascend version.
 
 ## Scoring Backend
 
@@ -82,12 +92,17 @@ At startup, look for these log lines:
 ```text
 [TriAttention] Runtime (V2) plugin activated: patch_scheduler=True patch_worker=True
 Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.worker.NPUWorker
+Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
 Compression events should report a status like `selector_status=enabled:torch:tp=1/2`
 when the first compression boundary is reached on NPU. The `tp=rank/size`
 suffix confirms that runtime scoring is using this worker's tensor-parallel
 head shard.
+
+For a long prompt on Ascend, it is normal to see skipped compression events with
+`reason=prefill_incomplete` during chunked prefill. The first real compression
+should happen once the prompt has finished prefill and decode starts.
 
 ## Calibration Stats
 

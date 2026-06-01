@@ -1,8 +1,7 @@
-"""Debug-only V1 GPUModelRunner input patch helpers.
+"""V1 ModelRunner input patch helpers.
 
-This module provides the smallest possible compatibility layer needed to
-validate effective override semantics on the legacy/default vLLM V1 runner
-path (`vllm.v1.worker.gpu_model_runner.GPUModelRunner`).
+This module provides the compatibility layer used by legacy/default vLLM V1
+GPUModelRunner and vLLM-Ascend NPUModelRunner paths.
 """
 
 from __future__ import annotations
