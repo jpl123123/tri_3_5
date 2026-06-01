@@ -1,7 +1,6 @@
 """Compression action execution for TriAttentionModelRunner."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from .constants import TRITON_SCORING_REQUIRED_MARKER
@@ -16,7 +15,7 @@ def execute_runner_compression_actions(
     signals: dict[str, CompressionSignal],
     strict_no_downgrade: bool,
     allowed_strict_skip_reasons: set[str],
-    logger: logging.Logger,
+    logger: Any,
     log_decisions: bool,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""

@@ -6,13 +6,11 @@ This module provides helper functions for:
 - Position index management
 - Debugging utilities
 """
-import logging
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import torch
-
-logger = logging.getLogger(__name__)
+from vllm.logger import logger
 
 
 def load_frequency_stats(

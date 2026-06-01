@@ -10,6 +10,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from vllm.logger import logger
+
 from .input_adapter import active_effective_input_overrides, prepare_effective_input_overrides
 from .input_patch_backend import assert_effective_overrides_consumed
 from .runner_struct_compat import debug_v1_override_path_enabled
@@ -103,8 +105,6 @@ def attach_execute_model_compression_events(
 
     Returns ``(output, remaining_pending_events)``.
     """
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
     applied_count = sum(1 for e in pending_events if e.get("status") == "applied")
     if output is None:
         if scheduler_output is not None and pending_events:
@@ -113,13 +113,13 @@ def attach_execute_model_compression_events(
                 "triattention_compression_events",
                 pending_events,
             )
-            _log.info(
+            logger.info(
                 "attach_events: output=None, attached %d events (%d applied) to scheduler_output (id=%d)",
                 len(pending_events), applied_count, id(scheduler_output),
             )
             return output, []
         if pending_events:
-            _log.warning(
+            logger.warning(
                 "attach_events: output=None scheduler_output=None, DROPPING %d events (%d applied)",
                 len(pending_events), applied_count,
             )
@@ -127,7 +127,7 @@ def attach_execute_model_compression_events(
     try:
         setattr(output, "triattention_compression_events", pending_events)
         if applied_count > 0:
-            _log.info(
+            logger.info(
                 "attach_events: attached %d events (%d applied) to output type=%s",
                 len(pending_events), applied_count, type(output).__name__,
             )

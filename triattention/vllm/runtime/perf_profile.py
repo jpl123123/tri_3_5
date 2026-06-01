@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 import time
@@ -32,7 +31,7 @@ def _env_int(name: str, default: int) -> int:
 class TriAttentionPerfProfile:
     """Aggregates per-step timing counters with sparse logging."""
 
-    logger: logging.Logger
+    logger: Any
     enabled: bool = False
     log_every_steps: int = 200
     total_steps: int = 0
@@ -53,7 +52,7 @@ class TriAttentionPerfProfile:
     sink_dir: str | None = None
 
     @classmethod
-    def from_env(cls, logger: logging.Logger) -> "TriAttentionPerfProfile":
+    def from_env(cls, logger: Any) -> "TriAttentionPerfProfile":
         sink_dir = os.environ.get("TRIATTN_RUNTIME_PERF_SINK_DIR")
         return cls(
             logger=logger,

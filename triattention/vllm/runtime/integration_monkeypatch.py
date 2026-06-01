@@ -10,7 +10,7 @@ import os
 from concurrent.futures import Future
 from typing import Any, Callable, cast
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
 
 from .config import TriAttentionRuntimeConfig
@@ -24,8 +24,6 @@ from .request_key_compat import iter_scheduled_token_items
 from .scheduler import TriAttentionScheduler
 from .signals import CompressionSignal
 from .worker import TriAttentionWorker, _debug_early_install_proxy_enabled
-
-logger = init_logger(__name__)
 
 _PATCHED = False
 _PATCHED_SCHEDULER_ACTIVE = False

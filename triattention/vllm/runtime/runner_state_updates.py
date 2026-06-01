@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any
 
@@ -83,7 +82,7 @@ def consume_runner_signals(
     state_store: Any,
     scheduler_output: Any,
     last_step: int,
-    logger: logging.Logger,
+    logger: Any,
     log_decisions: bool,
 ) -> tuple[int, dict[str, CompressionSignal]]:
     step = getattr(scheduler_output, "triattention_step", last_step + 1)

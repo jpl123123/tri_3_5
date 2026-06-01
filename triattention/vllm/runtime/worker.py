@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 try:
     from vllm.v1.worker.gpu_worker import Worker as VLLMGPUWorker
@@ -16,8 +16,6 @@ except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
 from .runner import TriAttentionModelRunner
-
-logger = init_logger(__name__)
 
 
 def _debug_early_install_proxy_enabled() -> bool:

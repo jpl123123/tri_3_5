@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-import logging
 from typing import Any
 
 import numpy as np
+from vllm.logger import logger
 
-logger = logging.getLogger(__name__)
 _DEBUG_DISABLE_LOGGED = False
 
 

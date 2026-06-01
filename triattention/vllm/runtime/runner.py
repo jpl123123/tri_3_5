@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import time
 from typing import Any
+
+from vllm.logger import logger
 
 from .config import TriAttentionRuntimeConfig
 from .executor import CompressionExecutor, RunnerHookCompressionExecutor
@@ -48,7 +49,7 @@ class TriAttentionModelRunner:
         setattr(base_runner, "_triattention_state_store", self.state_store)
         self.executor: CompressionExecutor = RunnerHookCompressionExecutor(base_runner)
         self._last_step = 0
-        self._logger = logging.getLogger(__name__)
+        self._logger = logger
         self._perf = TriAttentionPerfProfile.from_env(self._logger)
         self._pending_compression_events: list[dict[str, Any]] = []
         self._strict_no_downgrade = bool(self.config.enable_experimental_kv_compaction)

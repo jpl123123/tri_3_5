@@ -1,9 +1,10 @@
 """Installer for vLLM runtime input patch hooks used by TriAttention runtime."""
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any, Callable
+
+from vllm.logger import logger
 
 from .input_patch_ascend_backend import (
     make_patched_ascend_v2_compute_slot_mappings,
@@ -23,7 +24,6 @@ _ORIGINAL_ASCEND_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
-logger = logging.getLogger(__name__)
 
 
 def _debug_disable_v1_override_path() -> bool:

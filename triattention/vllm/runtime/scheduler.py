@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -23,8 +23,6 @@ from .kv_allocation_sync import (
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .signals import CompressionSignal
-
-logger = init_logger(__name__)
 
 def _evict_reclaimed_block_metadata(block_pool: Any, block: Any) -> None:
     """Best-effort clear of prefix-cache metadata before reusing a block."""
