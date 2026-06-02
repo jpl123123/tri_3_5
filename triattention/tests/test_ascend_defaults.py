@@ -58,10 +58,10 @@ def test_auto_fast_recency_tightens_decode_reclaim_interval():
 
     apply_ascend_fast_recency_defaults(config, env={})
 
-    assert config.min_reclaim_blocks_on_ascend == 2
+    assert config.min_reclaim_blocks_on_ascend == 1
 
 
-def test_auto_fast_recency_respects_explicit_reclaim_interval():
+def test_auto_fast_recency_overrides_stale_reclaim_interval():
     config = TriAttentionRuntimeConfig(
         fast_recency_only=True,
         fast_recency_accuracy_guard=False,
@@ -74,7 +74,7 @@ def test_auto_fast_recency_respects_explicit_reclaim_interval():
         env={"TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND": "8"},
     )
 
-    assert config.min_reclaim_blocks_on_ascend == 8
+    assert config.min_reclaim_blocks_on_ascend == 1
 
 
 def test_auto_fast_recency_can_be_disabled_to_keep_accuracy_guard():

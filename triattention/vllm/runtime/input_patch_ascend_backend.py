@@ -199,6 +199,8 @@ def make_patched_ascend_v2_build_attn_metadata(
         kwargs["max_seq_len"] = min(original_max_i, effective_max_seq_len)
         return original_build_attn_metadata(*args, **kwargs)
 
+    setattr(_patched_build_attn_metadata, "_triattention_patched", True)
+    setattr(_patched_build_attn_metadata, "_triattention_original", original_build_attn_metadata)
     return _patched_build_attn_metadata
 
 

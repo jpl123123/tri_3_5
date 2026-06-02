@@ -38,6 +38,10 @@ def _debug_disable_v1_override_path() -> bool:
     }
 
 
+def _is_triattention_patched(func: Any) -> bool:
+    return bool(getattr(func, "_triattention_patched", False))
+
+
 def install_runtime_input_patch_hooks() -> bool:
     """Patch vLLM GPU input prep once.
 
@@ -50,9 +54,6 @@ def install_runtime_input_patch_hooks() -> bool:
     global _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS
     global _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA
     global _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA
-    if _PATCH_INSTALLED:
-        return True
-
     patched_any = False
     patched_targets: list[str] = []
 
@@ -66,7 +67,12 @@ def install_runtime_input_patch_hooks() -> bool:
     if gpu_block_table is not None and gpu_model_runner is not None:
         original = getattr(gpu_model_runner, "prepare_pos_seq_lens", None)
         compute_slot_mappings = getattr(gpu_block_table.BlockTables, "compute_slot_mappings", None)
-        if original is not None and compute_slot_mappings is not None:
+        if (
+            original is not None
+            and compute_slot_mappings is not None
+            and _ORIGINAL_PREPARE_POS_SEQ_LENS is None
+            and _ORIGINAL_COMPUTE_SLOT_MAPPINGS is None
+        ):
             _ORIGINAL_PREPARE_POS_SEQ_LENS = original
             _ORIGINAL_COMPUTE_SLOT_MAPPINGS = compute_slot_mappings
             gpu_model_runner.prepare_pos_seq_lens = make_patched_prepare_pos_seq_lens(
@@ -85,7 +91,10 @@ def install_runtime_input_patch_hooks() -> bool:
             gpu_model_runner_v1 = None
         if gpu_model_runner_v1 is not None:
             original_v1_prepare_inputs = getattr(gpu_model_runner_v1.GPUModelRunner, "_prepare_inputs", None)
-            if original_v1_prepare_inputs is not None:
+            if (
+                original_v1_prepare_inputs is not None
+                and _ORIGINAL_V1_PREPARE_INPUTS is None
+            ):
                 _ORIGINAL_V1_PREPARE_INPUTS = original_v1_prepare_inputs
                 gpu_model_runner_v1.GPUModelRunner._prepare_inputs = make_patched_v1_prepare_inputs(
                     _ORIGINAL_V1_PREPARE_INPUTS
@@ -104,12 +113,13 @@ def install_runtime_input_patch_hooks() -> bool:
                 None,
             )
             if original_ascend_v1_prepare_inputs is not None:
-                _ORIGINAL_ASCEND_V1_PREPARE_INPUTS = original_ascend_v1_prepare_inputs
-                ascend_model_runner_v1.NPUModelRunner._prepare_inputs = make_patched_v1_prepare_inputs(
-                    _ORIGINAL_ASCEND_V1_PREPARE_INPUTS
-                )
-                patched_any = True
-                patched_targets.append("vllm_ascend.worker.model_runner_v1.NPUModelRunner")
+                if _ORIGINAL_ASCEND_V1_PREPARE_INPUTS is None:
+                    _ORIGINAL_ASCEND_V1_PREPARE_INPUTS = original_ascend_v1_prepare_inputs
+                    ascend_model_runner_v1.NPUModelRunner._prepare_inputs = make_patched_v1_prepare_inputs(
+                        _ORIGINAL_ASCEND_V1_PREPARE_INPUTS
+                    )
+                    patched_any = True
+                    patched_targets.append("vllm_ascend.worker.model_runner_v1.NPUModelRunner")
 
     try:
         import vllm_ascend.worker.v2.model_runner as ascend_model_runner_v2
@@ -121,7 +131,10 @@ def install_runtime_input_patch_hooks() -> bool:
             "prepare_pos_seq_lens",
             None,
         )
-        if original_prepare_pos_seq_lens is not None:
+        if (
+            original_prepare_pos_seq_lens is not None
+            and _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS is None
+        ):
             _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS = original_prepare_pos_seq_lens
             ascend_model_runner_v2.prepare_pos_seq_lens = make_patched_prepare_pos_seq_lens(
                 _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS
@@ -134,7 +147,10 @@ def install_runtime_input_patch_hooks() -> bool:
             "_update_seq_lens_cpu",
             None,
         )
-        if original_update_seq_lens_cpu is not None:
+        if (
+            original_update_seq_lens_cpu is not None
+            and _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU is None
+        ):
             _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU = original_update_seq_lens_cpu
             ascend_model_runner_v2.NPUModelRunner._update_seq_lens_cpu = (
                 make_patched_ascend_v2_update_seq_lens_cpu(
@@ -155,7 +171,12 @@ def install_runtime_input_patch_hooks() -> bool:
             "build_attn_metadata",
             None,
         )
-        if original_build_attn_metadata is not None:
+        if _is_triattention_patched(original_build_attn_metadata):
+            patched_ascend_build_attn_metadata = original_build_attn_metadata
+        elif (
+            original_build_attn_metadata is not None
+            and _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA is None
+        ):
             _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA = original_build_attn_metadata
             patched_ascend_build_attn_metadata = (
                 make_patched_ascend_v2_build_attn_metadata(
@@ -176,7 +197,13 @@ def install_runtime_input_patch_hooks() -> bool:
             "build_attn_metadata",
             None,
         )
-        if original_default_build_attn_metadata is not None:
+        if _is_triattention_patched(original_default_build_attn_metadata):
+            if patched_ascend_build_attn_metadata is None:
+                patched_ascend_build_attn_metadata = original_default_build_attn_metadata
+        elif (
+            original_default_build_attn_metadata is not None
+            and _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA is None
+        ):
             _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA = (
                 original_default_build_attn_metadata
             )
@@ -202,7 +229,10 @@ def install_runtime_input_patch_hooks() -> bool:
             "compute_slot_mappings",
             None,
         )
-        if original_ascend_compute_slot_mappings is not None:
+        if (
+            original_ascend_compute_slot_mappings is not None
+            and _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS is None
+        ):
             _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS = (
                 original_ascend_compute_slot_mappings
             )
@@ -214,10 +244,10 @@ def install_runtime_input_patch_hooks() -> bool:
             patched_any = True
             patched_targets.append("vllm_ascend.worker.v2.block_table.AscendBlockTables")
 
-    _PATCH_INSTALLED = patched_any
+    _PATCH_INSTALLED = _PATCH_INSTALLED or patched_any
     if patched_targets:
         logger.info(
             "Installed TriAttention runtime input patches: %s",
             ", ".join(patched_targets),
         )
-    return patched_any
+    return _PATCH_INSTALLED

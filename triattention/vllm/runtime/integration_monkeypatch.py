@@ -13,6 +13,7 @@ from typing import Any, Callable, cast
 from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
 
+from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
 from .effective_len_tracker import EffectiveCacheLenTracker
 from .kv_allocation_sync import (
@@ -99,6 +100,8 @@ def _patched_scheduler_init(self, *args, **kwargs):
     assert _ORIG_SCHED_INIT is not None
     _ORIG_SCHED_INIT(self, *args, **kwargs)
     cfg = TriAttentionRuntimeConfig.from_env()
+    if is_ascend_environment_available():
+        apply_ascend_fast_recency_defaults(cfg)
     # Always attach config/state once patched to keep behavior deterministic.
     self.triattention_config = cfg
     self._planner = CompressionPlanner(cfg)
@@ -109,9 +112,11 @@ def _patched_scheduler_init(self, *args, **kwargs):
     self._triattention_step = 0
     logger.info(
         "TriAttention monkeypatched Scheduler initialized: budget=%d divide_length=%d "
-        "protect_prefill=%s disable_compression=%s kv_usage_trigger_enabled=%s",
+        "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
+        "disable_compression=%s kv_usage_trigger_enabled=%s",
         cfg.kv_budget,
         cfg.divide_length,
+        int(getattr(cfg, "min_reclaim_blocks_on_ascend", 0) or 0),
         cfg.protect_prefill,
         cfg.disable_compression,
         cfg.enable_kv_usage_trigger,
