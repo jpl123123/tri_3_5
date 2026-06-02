@@ -14,7 +14,67 @@ from vllm.logger import logger
 
 from .input_adapter import active_effective_input_overrides, prepare_effective_input_overrides
 from .input_patch_backend import assert_effective_overrides_consumed
+from .phase_profile import (
+    phase_elapsed_ms,
+    phase_now,
+    phase_profile_enabled,
+    record_phase,
+)
 from .runner_struct_compat import debug_v1_override_path_enabled
+
+
+def _scheduler_output_details(
+    scheduler_output: Any,
+    *,
+    overrides: bool,
+    sparse_overrides: bool,
+) -> dict[str, Any]:
+    num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    num_reqs = len(num_scheduled) if isinstance(num_scheduled, dict) else None
+    total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", None)
+    if total_tokens is None and isinstance(num_scheduled, dict):
+        try:
+            total_tokens = sum(int(v) for v in num_scheduled.values())
+        except Exception:
+            total_tokens = None
+    try:
+        total_tokens_i = int(total_tokens)
+    except Exception:
+        total_tokens_i = None
+    return {
+        "num_reqs": num_reqs,
+        "total_tokens": total_tokens_i,
+        "overrides": int(overrides),
+        "sparse_overrides": int(sparse_overrides),
+    }
+
+
+def _execute_base_runner(
+    *,
+    base_runner: Any,
+    scheduler_output: Any,
+    intermediate_tensors: Any,
+    overrides: bool,
+    sparse_overrides: bool,
+) -> Any:
+    profile_enabled = phase_profile_enabled()
+    t0 = phase_now() if profile_enabled else 0.0
+    try:
+        return base_runner.execute_model(
+            scheduler_output=scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+        )
+    finally:
+        if profile_enabled:
+            record_phase(
+                "base_runner_execute_model",
+                phase_elapsed_ms(t0),
+                _scheduler_output_details(
+                    scheduler_output,
+                    overrides=overrides,
+                    sparse_overrides=sparse_overrides,
+                ),
+            )
 
 
 def execute_base_model_with_effective_overrides(
@@ -32,9 +92,12 @@ def execute_base_model_with_effective_overrides(
     if not use_effective_overrides:
         if perf_enabled:
             t0 = time.perf_counter()
-        output = base_runner.execute_model(
+        output = _execute_base_runner(
+            base_runner=base_runner,
             scheduler_output=scheduler_output,
             intermediate_tensors=intermediate_tensors,
+            overrides=False,
+            sparse_overrides=False,
         )
         if perf_enabled:
             t1 = time.perf_counter()
@@ -60,9 +123,12 @@ def execute_base_model_with_effective_overrides(
     ):
         if perf_enabled:
             t2 = time.perf_counter()
-        output = base_runner.execute_model(
+        output = _execute_base_runner(
+            base_runner=base_runner,
             scheduler_output=scheduler_output,
             intermediate_tensors=intermediate_tensors,
+            overrides=True,
+            sparse_overrides=False,
         )
         if perf_enabled:
             t3 = time.perf_counter()
@@ -73,9 +139,12 @@ def execute_base_model_with_effective_overrides(
     with active_effective_input_overrides(overrides):
         if perf_enabled:
             t2 = time.perf_counter()
-        output = base_runner.execute_model(
+        output = _execute_base_runner(
+            base_runner=base_runner,
             scheduler_output=scheduler_output,
             intermediate_tensors=intermediate_tensors,
+            overrides=True,
+            sparse_overrides=True,
         )
         if perf_enabled:
             t3 = time.perf_counter()

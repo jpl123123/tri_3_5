@@ -29,6 +29,12 @@ from .runner_state_updates import (
     register_new_requests,
 )
 from .perf_profile import TriAttentionPerfProfile
+from .phase_profile import (
+    phase_elapsed_ms,
+    phase_now,
+    phase_profile_enabled,
+    record_phase,
+)
 from .signals import CompressionSignal
 from .state import RequestStateStore
 from .thresholds import (
@@ -641,7 +647,19 @@ class TriAttentionModelRunner:
     def sample_tokens(self, grammar_output: Any) -> Any:
         # In vLLM V1 async path, execute_model returns None and the actual
         # ModelRunnerOutput (with sampled_token_ids) is produced here.
-        output = self._base_runner.sample_tokens(grammar_output)
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        try:
+            output = self._base_runner.sample_tokens(grammar_output)
+        finally:
+            if profile_enabled:
+                record_phase(
+                    "base_runner_sample_tokens",
+                    phase_elapsed_ms(t0),
+                    {
+                        "pending_events": len(self._pending_compression_events),
+                    },
+                )
         output, self._pending_compression_events = attach_sample_tokens_compression_events(
             output=output,
             pending_events=self._pending_compression_events,

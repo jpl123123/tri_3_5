@@ -13,6 +13,12 @@ from .input_patch_ops import (
     overwrite_seq_lens_from_effective_lengths,
     shift_positions_from_sparse_deltas,
 )
+from .phase_profile import (
+    phase_elapsed_ms,
+    phase_now,
+    phase_profile_enabled,
+    record_phase,
+)
 
 
 def _debug_disable_seq_override() -> bool:
@@ -112,9 +118,23 @@ def make_patched_prepare_pos_seq_lens(
         pos: torch.Tensor,
         seq_lens: torch.Tensor,
     ) -> None:
-        # Hard no-op fast path after monkey patch is installed but the current
-        # step does not require any effective-length overrides.
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        try:
+            # Hard no-op fast path after monkey patch is installed but the current
+            # step does not require any effective-length overrides.
+            if not overrides_enabled:
+                original_prepare_pos_seq_lens(
+                    idx_mapping,
+                    query_start_loc,
+                    num_computed_tokens,
+                    pos,
+                    seq_lens,
+                )
+                return
+            _patch_state.mark_active_effective_overrides_consumed()
+            _validate_mapping_once(idx_mapping, query_start_loc)
             original_prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
@@ -122,58 +142,60 @@ def make_patched_prepare_pos_seq_lens(
                 pos,
                 seq_lens,
             )
-            return
-        _patch_state.mark_active_effective_overrides_consumed()
-        _validate_mapping_once(idx_mapping, query_start_loc)
-        original_prepare_pos_seq_lens(
-            idx_mapping,
-            query_start_loc,
-            num_computed_tokens,
-            pos,
-            seq_lens,
-        )
-        if _debug_disable_seq_override():
-            return
-        eff = _patch_state.ACTIVE_EFFECTIVE_NUM_COMPUTED_TOKENS
-        if eff is None:
-            if (
-                int(idx_mapping.shape[0]) == 1
-                and _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None
-            ):
-                qlen_t = (query_start_loc[1] - query_start_loc[0]).to(
-                    device=seq_lens.device, dtype=seq_lens.dtype
-                )
-                base_t = torch.as_tensor(
-                    _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE,
-                    device=seq_lens.device,
-                    dtype=seq_lens.dtype,
-                )
-                seq_lens[0].copy_(base_t + qlen_t)
+            if _debug_disable_seq_override():
                 return
-            sparse_bases = _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX
-            if sparse_bases:
-                sparse_base_lookup = _patch_state.get_active_effective_base_lookup_tensors(
-                    seq_lens.device
-                )
-                applied = overwrite_seq_lens_from_effective_base_map(
-                    idx_mapping=idx_mapping,
-                    query_start_loc=query_start_loc,
-                    effective_base_by_req_idx=sparse_bases,
-                    seq_lens=seq_lens,
-                    effective_base_lookup_tensors=sparse_base_lookup,
-                )
-                if not applied and int(idx_mapping.shape[0]) > 0:
-                    raise RuntimeError(
-                        "TRIATTN_SEQ_LENS_SPARSE_BASE_APPLY_FAILED:"
-                        "sparse_base_present_but_no_rows_were_overwritten"
+            eff = _patch_state.ACTIVE_EFFECTIVE_NUM_COMPUTED_TOKENS
+            if eff is None:
+                if (
+                    int(idx_mapping.shape[0]) == 1
+                    and _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None
+                ):
+                    qlen_t = (query_start_loc[1] - query_start_loc[0]).to(
+                        device=seq_lens.device, dtype=seq_lens.dtype
                     )
-            return
-        overwrite_seq_lens_from_effective_lengths(
-            idx_mapping=idx_mapping,
-            query_start_loc=query_start_loc,
-            effective_num_computed_tokens=eff,
-            seq_lens=seq_lens,
-        )
+                    base_t = torch.as_tensor(
+                        _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE,
+                        device=seq_lens.device,
+                        dtype=seq_lens.dtype,
+                    )
+                    seq_lens[0].copy_(base_t + qlen_t)
+                    return
+                sparse_bases = _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX
+                if sparse_bases:
+                    sparse_base_lookup = _patch_state.get_active_effective_base_lookup_tensors(
+                        seq_lens.device
+                    )
+                    applied = overwrite_seq_lens_from_effective_base_map(
+                        idx_mapping=idx_mapping,
+                        query_start_loc=query_start_loc,
+                        effective_base_by_req_idx=sparse_bases,
+                        seq_lens=seq_lens,
+                        effective_base_lookup_tensors=sparse_base_lookup,
+                    )
+                    if not applied and int(idx_mapping.shape[0]) > 0:
+                        raise RuntimeError(
+                            "TRIATTN_SEQ_LENS_SPARSE_BASE_APPLY_FAILED:"
+                            "sparse_base_present_but_no_rows_were_overwritten"
+                        )
+                return
+            overwrite_seq_lens_from_effective_lengths(
+                idx_mapping=idx_mapping,
+                query_start_loc=query_start_loc,
+                effective_num_computed_tokens=eff,
+                seq_lens=seq_lens,
+            )
+        finally:
+            if profile_enabled:
+                record_phase(
+                    "prepare_pos_seq_lens",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": int(idx_mapping.shape[0]),
+                        "positions": int(pos.numel()),
+                        "seq_lens": int(seq_lens.numel()),
+                        "overrides": int(overrides_enabled),
+                    },
+                )
 
     return _patched_prepare_pos_seq_lens
 
@@ -182,63 +204,93 @@ def make_patched_compute_slot_mappings(
     original_compute_slot_mappings: Callable[..., Any],
 ) -> Callable[..., Any]:
     def _patched_compute_slot_mappings(self, idx_mapping, query_start_loc, positions):
-        # Hard no-op fast path when overrides are not active for this step.
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
-            return original_compute_slot_mappings(self, idx_mapping, query_start_loc, positions)
-        _patch_state.mark_active_effective_overrides_consumed()
-        _validate_mapping_once(idx_mapping, query_start_loc)
-        # Keep decode positions in the original absolute RoPE space. After
-        # compaction we still need seq_len overrides so attention/masking sees
-        # the effective compressed history length, but shifting token positions
-        # here corrupts continuation semantics for real serve/chat payloads.
-        #
-        # The old shift path is retained behind a debug-only opt-in so we can
-        # bisect regressions without putting extra work back on the hot path.
-        if _debug_disable_slot_shift() or not _debug_enable_slot_shift():
-            return original_compute_slot_mappings(self, idx_mapping, query_start_loc, positions)
-        eff_positions = _patch_state.ACTIVE_EFFECTIVE_POSITIONS
-        if (
-            isinstance(eff_positions, torch.Tensor)
-            and eff_positions.ndim == 1
-            and eff_positions.numel() == positions.numel()
-        ):
-            out = original_compute_slot_mappings(self, idx_mapping, query_start_loc, eff_positions)
-            return out
-        if isinstance(eff_positions, torch.Tensor):
-            raise RuntimeError(
-                "TRIATTN_EFFECTIVE_POSITIONS_SHAPE_MISMATCH:"
-                f"expected_numel={int(positions.numel())}:"
-                f"actual_numel={int(eff_positions.numel())}:"
-                f"actual_ndim={int(eff_positions.ndim)}"
-            )
-        sparse_pos_deltas = _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX
-        if (
-            int(idx_mapping.shape[0]) == 1
-            and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0
-        ):
-            out = positions.clone()
-            out.add_(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
-            return original_compute_slot_mappings(self, idx_mapping, query_start_loc, out)
-        if sparse_pos_deltas:
-            sparse_pos_delta_lookup = _patch_state.get_active_effective_pos_delta_lookup_tensors(
-                positions.device
-            )
-            shifted_positions = shift_positions_from_sparse_deltas(
-                idx_mapping=idx_mapping,
-                query_start_loc=query_start_loc,
-                positions=positions,
-                pos_delta_by_req_idx=sparse_pos_deltas,
-                pos_delta_lookup_tensors=sparse_pos_delta_lookup,
-            )
-            if shifted_positions is not None:
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        shifted = False
+        try:
+            # Hard no-op fast path when overrides are not active for this step.
+            if not overrides_enabled:
                 return original_compute_slot_mappings(
-                    self, idx_mapping, query_start_loc, shifted_positions
+                    self, idx_mapping, query_start_loc, positions
                 )
-            if int(idx_mapping.shape[0]) > 0:
+            _patch_state.mark_active_effective_overrides_consumed()
+            _validate_mapping_once(idx_mapping, query_start_loc)
+            # Keep decode positions in the original absolute RoPE space. After
+            # compaction we still need seq_len overrides so attention/masking sees
+            # the effective compressed history length, but shifting token positions
+            # here corrupts continuation semantics for real serve/chat payloads.
+            #
+            # The old shift path is retained behind a debug-only opt-in so we can
+            # bisect regressions without putting extra work back on the hot path.
+            if _debug_disable_slot_shift() or not _debug_enable_slot_shift():
+                return original_compute_slot_mappings(
+                    self, idx_mapping, query_start_loc, positions
+                )
+            eff_positions = _patch_state.ACTIVE_EFFECTIVE_POSITIONS
+            if (
+                isinstance(eff_positions, torch.Tensor)
+                and eff_positions.ndim == 1
+                and eff_positions.numel() == positions.numel()
+            ):
+                shifted = eff_positions is not positions
+                out = original_compute_slot_mappings(
+                    self, idx_mapping, query_start_loc, eff_positions
+                )
+                return out
+            if isinstance(eff_positions, torch.Tensor):
                 raise RuntimeError(
-                    "TRIATTN_SLOT_MAPPING_SPARSE_SHIFT_FAILED:"
-                    "sparse_pos_delta_present_but_shift_positions_failed"
+                    "TRIATTN_EFFECTIVE_POSITIONS_SHAPE_MISMATCH:"
+                    f"expected_numel={int(positions.numel())}:"
+                    f"actual_numel={int(eff_positions.numel())}:"
+                    f"actual_ndim={int(eff_positions.ndim)}"
                 )
-        return original_compute_slot_mappings(self, idx_mapping, query_start_loc, positions)
+            sparse_pos_deltas = _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX
+            if (
+                int(idx_mapping.shape[0]) == 1
+                and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0
+            ):
+                out = positions.clone()
+                out.add_(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
+                shifted = True
+                return original_compute_slot_mappings(
+                    self, idx_mapping, query_start_loc, out
+                )
+            if sparse_pos_deltas:
+                sparse_pos_delta_lookup = _patch_state.get_active_effective_pos_delta_lookup_tensors(
+                    positions.device
+                )
+                shifted_positions = shift_positions_from_sparse_deltas(
+                    idx_mapping=idx_mapping,
+                    query_start_loc=query_start_loc,
+                    positions=positions,
+                    pos_delta_by_req_idx=sparse_pos_deltas,
+                    pos_delta_lookup_tensors=sparse_pos_delta_lookup,
+                )
+                if shifted_positions is not None:
+                    shifted = shifted_positions is not positions
+                    return original_compute_slot_mappings(
+                        self, idx_mapping, query_start_loc, shifted_positions
+                    )
+                if int(idx_mapping.shape[0]) > 0:
+                    raise RuntimeError(
+                        "TRIATTN_SLOT_MAPPING_SPARSE_SHIFT_FAILED:"
+                        "sparse_pos_delta_present_but_shift_positions_failed"
+                    )
+            return original_compute_slot_mappings(
+                self, idx_mapping, query_start_loc, positions
+            )
+        finally:
+            if profile_enabled:
+                record_phase(
+                    "compute_slot_mappings",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": int(idx_mapping.shape[0]),
+                        "positions": int(positions.numel()),
+                        "overrides": int(overrides_enabled),
+                        "shifted": int(shifted),
+                    },
+                )
 
     return _patched_compute_slot_mappings

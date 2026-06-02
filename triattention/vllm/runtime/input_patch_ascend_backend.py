@@ -10,6 +10,12 @@ import torch
 
 from . import input_patch_state as _patch_state
 from .input_patch_ops import shift_positions_from_sparse_deltas
+from .phase_profile import (
+    phase_elapsed_ms,
+    phase_now,
+    phase_profile_enabled,
+    record_phase,
+)
 
 
 def _debug_drop_pos_delta() -> bool:
@@ -145,34 +151,64 @@ def _effective_max_seq_len_from_np(
     return max(1, max_seq_len)
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_numel(value: Any) -> int | None:
+    try:
+        return int(value.numel())
+    except Exception:
+        return None
+
+
 def make_patched_ascend_v2_update_seq_lens_cpu(
     original_update_seq_lens_cpu: Callable[..., Any],
 ) -> Callable[..., Any]:
     """Patch Ascend V2 CPU seq_lens, used by NPU attention metadata."""
 
     def _patched_update_seq_lens_cpu(self, scheduler_output, req_ids):
-        out = original_update_seq_lens_cpu(self, scheduler_output, req_ids)
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        applied = False
+        try:
+            out = original_update_seq_lens_cpu(self, scheduler_output, req_ids)
+            if not overrides_enabled:
+                return out
+            _patch_state.mark_active_effective_overrides_consumed()
+            input_buffers = getattr(self, "input_buffers", None)
+            seq_lens_np = getattr(input_buffers, "seq_lens_np", None)
+            req_states = getattr(self, "req_states", None)
+            req_id_to_index = getattr(req_states, "req_id_to_index", None)
+            num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+            if (
+                not isinstance(seq_lens_np, np.ndarray)
+                or not isinstance(req_id_to_index, dict)
+                or not isinstance(num_scheduled, dict)
+            ):
+                return out
+            applied = _apply_sparse_seq_len_overrides_cpu(
+                seq_lens_np=seq_lens_np,
+                req_ids=list(req_ids),
+                req_id_to_index=req_id_to_index,
+                num_scheduled_tokens_by_req_id=num_scheduled,
+            )
             return out
-        _patch_state.mark_active_effective_overrides_consumed()
-        input_buffers = getattr(self, "input_buffers", None)
-        seq_lens_np = getattr(input_buffers, "seq_lens_np", None)
-        req_states = getattr(self, "req_states", None)
-        req_id_to_index = getattr(req_states, "req_id_to_index", None)
-        num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
-        if (
-            not isinstance(seq_lens_np, np.ndarray)
-            or not isinstance(req_id_to_index, dict)
-            or not isinstance(num_scheduled, dict)
-        ):
-            return out
-        _apply_sparse_seq_len_overrides_cpu(
-            seq_lens_np=seq_lens_np,
-            req_ids=list(req_ids),
-            req_id_to_index=req_id_to_index,
-            num_scheduled_tokens_by_req_id=num_scheduled,
-        )
-        return out
+        finally:
+            if profile_enabled:
+                record_phase(
+                    "ascend_v2_update_seq_lens_cpu",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": len(req_ids) if req_ids is not None else None,
+                        "overrides": int(overrides_enabled),
+                        "applied": int(applied),
+                    },
+                )
 
     return _patched_update_seq_lens_cpu
 
@@ -183,21 +219,56 @@ def make_patched_ascend_v2_build_attn_metadata(
     """Patch Ascend V2 attention metadata to use effective max seq length."""
 
     def _patched_build_attn_metadata(*args, **kwargs):
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
-            return original_build_attn_metadata(*args, **kwargs)
-        effective_max_seq_len = _effective_max_seq_len_from_np(
-            seq_lens_np=kwargs.get("seq_lens_np"),
-            num_reqs=kwargs.get("num_reqs"),
-        )
-        if effective_max_seq_len is None:
-            return original_build_attn_metadata(*args, **kwargs)
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        seq_lens_np = kwargs.get("seq_lens_np")
+        num_reqs = kwargs.get("num_reqs")
         original_max = kwargs.get("max_seq_len")
+        effective_max_seq_len = None
+        final_max = original_max
         try:
-            original_max_i = int(original_max)
-        except (TypeError, ValueError):
-            original_max_i = effective_max_seq_len
-        kwargs["max_seq_len"] = min(original_max_i, effective_max_seq_len)
-        return original_build_attn_metadata(*args, **kwargs)
+            if not overrides_enabled:
+                return original_build_attn_metadata(*args, **kwargs)
+            effective_max_seq_len = _effective_max_seq_len_from_np(
+                seq_lens_np=seq_lens_np,
+                num_reqs=num_reqs,
+            )
+            if effective_max_seq_len is None:
+                return original_build_attn_metadata(*args, **kwargs)
+            original_max_i = _safe_int(original_max)
+            if original_max_i is None:
+                original_max_i = effective_max_seq_len
+            final_max = min(original_max_i, effective_max_seq_len)
+            kwargs["max_seq_len"] = final_max
+            return original_build_attn_metadata(*args, **kwargs)
+        finally:
+            if profile_enabled:
+                seq_lens_np_max = None
+                if isinstance(seq_lens_np, np.ndarray):
+                    active_num_reqs = _safe_int(num_reqs)
+                    if active_num_reqs is not None and active_num_reqs > 0:
+                        active = seq_lens_np[:active_num_reqs]
+                        if active.size > 0:
+                            try:
+                                seq_lens_np_max = int(active.max(initial=0))
+                            except TypeError:
+                                seq_lens_np_max = int(active.max())
+                record_phase(
+                    "ascend_v2_build_attn_metadata",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": _safe_int(num_reqs),
+                        "num_tokens": _safe_int(kwargs.get("num_tokens")),
+                        "max_query_len": _safe_int(kwargs.get("max_query_len")),
+                        "max_seq_in": _safe_int(original_max),
+                        "max_seq_eff": effective_max_seq_len,
+                        "max_seq_out": _safe_int(final_max),
+                        "seq_lens_np_max": seq_lens_np_max,
+                        "overrides": int(overrides_enabled),
+                        "attn_state": kwargs.get("attn_state"),
+                    },
+                )
 
     setattr(_patched_build_attn_metadata, "_triattention_patched", True)
     setattr(_patched_build_attn_metadata, "_triattention_original", original_build_attn_metadata)
@@ -218,32 +289,52 @@ def make_patched_ascend_v2_compute_slot_mappings(
         *args,
         **kwargs,
     ):
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        shifted = False
+        try:
+            if not overrides_enabled:
+                return original_compute_slot_mappings(
+                    self,
+                    idx_mapping,
+                    query_start_loc,
+                    positions,
+                    num_tokens_padded,
+                    *args,
+                    **kwargs,
+                )
+            _patch_state.mark_active_effective_overrides_consumed()
+            effective_positions = _build_effective_slot_positions_tensor(
+                idx_mapping=idx_mapping,
+                query_start_loc=query_start_loc,
+                positions=positions,
+            )
+            if effective_positions is None:
+                effective_positions = positions
+            else:
+                shifted = effective_positions is not positions
             return original_compute_slot_mappings(
                 self,
                 idx_mapping,
                 query_start_loc,
-                positions,
+                effective_positions,
                 num_tokens_padded,
                 *args,
                 **kwargs,
             )
-        _patch_state.mark_active_effective_overrides_consumed()
-        effective_positions = _build_effective_slot_positions_tensor(
-            idx_mapping=idx_mapping,
-            query_start_loc=query_start_loc,
-            positions=positions,
-        )
-        if effective_positions is None:
-            effective_positions = positions
-        return original_compute_slot_mappings(
-            self,
-            idx_mapping,
-            query_start_loc,
-            effective_positions,
-            num_tokens_padded,
-            *args,
-            **kwargs,
-        )
+        finally:
+            if profile_enabled:
+                record_phase(
+                    "ascend_v2_compute_slot_mappings",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": _safe_int(getattr(idx_mapping, "shape", [None])[0]),
+                        "positions": _safe_numel(positions),
+                        "num_tokens_padded": _safe_int(num_tokens_padded),
+                        "overrides": int(overrides_enabled),
+                        "shifted": int(shifted),
+                    },
+                )
 
     return _patched_compute_slot_mappings

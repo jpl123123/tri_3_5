@@ -16,17 +16,22 @@ from .input_patch_vllm_backend import (
     make_patched_prepare_pos_seq_lens,
 )
 from .input_patch_vllm_v1_backend import make_patched_v1_prepare_inputs
+from .phase_profile import make_timed_wrapper
 
 _PATCH_INSTALLED = False
 _ORIGINAL_PREPARE_POS_SEQ_LENS: Callable[..., Any] | None = None
 _ORIGINAL_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
 _ORIGINAL_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_EXECUTE_MODEL: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_PREPARE_INPUTS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_POSTPROCESS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_PREPARE_ATTN: Callable[..., Any] | None = None
 
 
 def _debug_disable_v1_override_path() -> bool:
@@ -42,6 +47,119 @@ def _is_triattention_patched(func: Any) -> bool:
     return bool(getattr(func, "_triattention_patched", False))
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _scheduler_output_details(scheduler_output: Any) -> dict[str, Any]:
+    num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    num_reqs = len(num_scheduled) if isinstance(num_scheduled, dict) else None
+    total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", None)
+    if total_tokens is None and isinstance(num_scheduled, dict):
+        try:
+            total_tokens = sum(int(v) for v in num_scheduled.values())
+        except Exception:
+            total_tokens = None
+    return {
+        "num_reqs": num_reqs,
+        "total_tokens": _safe_int(total_tokens),
+    }
+
+
+def _execute_model_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    scheduler_output = kwargs.get("scheduler_output")
+    if scheduler_output is None and len(args) >= 2:
+        scheduler_output = args[1]
+    return _scheduler_output_details(scheduler_output)
+
+
+def _prepare_inputs_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    scheduler_output = kwargs.get("scheduler_output")
+    batch_desc = kwargs.get("batch_desc")
+    if scheduler_output is None and len(args) >= 2:
+        scheduler_output = args[1]
+    if batch_desc is None and len(args) >= 3:
+        batch_desc = args[2]
+    details = _scheduler_output_details(scheduler_output)
+    details.update(
+        {
+            "batch_tokens": _safe_int(getattr(batch_desc, "num_tokens", None)),
+            "batch_reqs": _safe_int(getattr(batch_desc, "num_reqs", None)),
+            "cg_mode": getattr(batch_desc, "cg_mode", None),
+        }
+    )
+    if result is not None:
+        details.update(
+            {
+                "out_reqs": _safe_int(getattr(result, "num_reqs", None)),
+                "out_tokens": _safe_int(getattr(result, "num_tokens", None)),
+                "out_tokens_padded": _safe_int(
+                    getattr(result, "num_tokens_after_padding", None)
+                ),
+                "attn_state": getattr(result, "attn_state", None),
+            }
+        )
+    return details
+
+
+def _postprocess_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del kwargs, result
+    input_batch = args[1] if len(args) >= 2 else None
+    return {
+        "num_reqs": _safe_int(getattr(input_batch, "num_reqs", None)),
+        "num_tokens": _safe_int(getattr(input_batch, "num_tokens", None)),
+        "num_tokens_padded": _safe_int(
+            getattr(input_batch, "num_tokens_after_padding", None)
+        ),
+        "attn_state": getattr(input_batch, "attn_state", None),
+    }
+
+
+def _prepare_attn_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    self_obj = args[0] if args else None
+    input_batch = kwargs.get("input_batch")
+    cudagraph_mode = kwargs.get("cudagraph_mode")
+    block_tables = kwargs.get("block_tables")
+    if input_batch is None and len(args) >= 2:
+        input_batch = args[1]
+    if cudagraph_mode is None and len(args) >= 3:
+        cudagraph_mode = args[2]
+    if block_tables is None and len(args) >= 4:
+        block_tables = args[3]
+    return {
+        "num_reqs": _safe_int(getattr(input_batch, "num_reqs", None)),
+        "num_tokens": _safe_int(getattr(input_batch, "num_tokens", None)),
+        "num_tokens_padded": _safe_int(
+            getattr(input_batch, "num_tokens_after_padding", None)
+        ),
+        "max_model_len": _safe_int(getattr(self_obj, "max_model_len", None)),
+        "cg_mode": cudagraph_mode,
+        "attn_state": getattr(input_batch, "attn_state", None),
+        "kv_groups": len(block_tables) if isinstance(block_tables, tuple) else None,
+    }
+
+
 def install_runtime_input_patch_hooks() -> bool:
     """Patch vLLM GPU input prep once.
 
@@ -49,11 +167,14 @@ def install_runtime_input_patch_hooks() -> bool:
     """
     global _PATCH_INSTALLED, _ORIGINAL_PREPARE_POS_SEQ_LENS, _ORIGINAL_COMPUTE_SLOT_MAPPINGS
     global _ORIGINAL_V1_PREPARE_INPUTS, _ORIGINAL_ASCEND_V1_PREPARE_INPUTS
+    global _ORIGINAL_ASCEND_V2_EXECUTE_MODEL, _ORIGINAL_ASCEND_V2_PREPARE_INPUTS
+    global _ORIGINAL_ASCEND_V2_POSTPROCESS
     global _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS
     global _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU
     global _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS
     global _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA
     global _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA
+    global _ORIGINAL_ASCEND_V2_PREPARE_ATTN
     patched_any = False
     patched_targets: list[str] = []
 
@@ -126,6 +247,66 @@ def install_runtime_input_patch_hooks() -> bool:
     except Exception:
         ascend_model_runner_v2 = None
     if ascend_model_runner_v2 is not None:
+        original_execute_model = getattr(
+            ascend_model_runner_v2.NPUModelRunner,
+            "execute_model",
+            None,
+        )
+        if (
+            original_execute_model is not None
+            and _ORIGINAL_ASCEND_V2_EXECUTE_MODEL is None
+        ):
+            _ORIGINAL_ASCEND_V2_EXECUTE_MODEL = original_execute_model
+            ascend_model_runner_v2.NPUModelRunner.execute_model = make_timed_wrapper(
+                "ascend_v2_execute_model",
+                _ORIGINAL_ASCEND_V2_EXECUTE_MODEL,
+                _execute_model_details,
+            )
+            patched_any = True
+            patched_targets.append(
+                "vllm_ascend.worker.v2.model_runner.NPUModelRunner.execute_model"
+            )
+
+        original_prepare_inputs = getattr(
+            ascend_model_runner_v2.NPUModelRunner,
+            "prepare_inputs",
+            None,
+        )
+        if (
+            original_prepare_inputs is not None
+            and _ORIGINAL_ASCEND_V2_PREPARE_INPUTS is None
+        ):
+            _ORIGINAL_ASCEND_V2_PREPARE_INPUTS = original_prepare_inputs
+            ascend_model_runner_v2.NPUModelRunner.prepare_inputs = make_timed_wrapper(
+                "ascend_v2_prepare_inputs",
+                _ORIGINAL_ASCEND_V2_PREPARE_INPUTS,
+                _prepare_inputs_details,
+            )
+            patched_any = True
+            patched_targets.append(
+                "vllm_ascend.worker.v2.model_runner.NPUModelRunner.prepare_inputs"
+            )
+
+        original_postprocess = getattr(
+            ascend_model_runner_v2.NPUModelRunner,
+            "postprocess",
+            None,
+        )
+        if (
+            original_postprocess is not None
+            and _ORIGINAL_ASCEND_V2_POSTPROCESS is None
+        ):
+            _ORIGINAL_ASCEND_V2_POSTPROCESS = original_postprocess
+            ascend_model_runner_v2.NPUModelRunner.postprocess = make_timed_wrapper(
+                "ascend_v2_postprocess",
+                _ORIGINAL_ASCEND_V2_POSTPROCESS,
+                _postprocess_details,
+            )
+            patched_any = True
+            patched_targets.append(
+                "vllm_ascend.worker.v2.model_runner.NPUModelRunner.postprocess"
+            )
+
         original_prepare_pos_seq_lens = getattr(
             ascend_model_runner_v2,
             "prepare_pos_seq_lens",
@@ -192,6 +373,26 @@ def install_runtime_input_patch_hooks() -> bool:
     except Exception:
         ascend_default_state_v2 = None
     if ascend_default_state_v2 is not None:
+        original_prepare_attn = getattr(
+            ascend_default_state_v2.AscendModelState,
+            "prepare_attn",
+            None,
+        )
+        if (
+            original_prepare_attn is not None
+            and _ORIGINAL_ASCEND_V2_PREPARE_ATTN is None
+        ):
+            _ORIGINAL_ASCEND_V2_PREPARE_ATTN = original_prepare_attn
+            ascend_default_state_v2.AscendModelState.prepare_attn = make_timed_wrapper(
+                "ascend_v2_prepare_attn",
+                _ORIGINAL_ASCEND_V2_PREPARE_ATTN,
+                _prepare_attn_details,
+            )
+            patched_any = True
+            patched_targets.append(
+                "vllm_ascend.worker.v2.model_states.default.AscendModelState.prepare_attn"
+            )
+
         original_default_build_attn_metadata = getattr(
             ascend_default_state_v2,
             "build_attn_metadata",
