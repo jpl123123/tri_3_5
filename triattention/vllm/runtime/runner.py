@@ -96,6 +96,7 @@ class TriAttentionModelRunner:
         self._allowed_strict_skip_reasons = {
             "under_budget",
             "prefill_incomplete",
+            "prefill_compression_limit",
             "defer_recompress",
             "prefill_exceeds_budget",
             "req_state_not_found",
