@@ -10,6 +10,7 @@ from vllm.logger import logger
 
 from .config import TriAttentionRuntimeConfig
 from .executor import CompressionExecutor, RunnerHookCompressionExecutor
+from .fast_recency_guard import should_guard_fast_recency_long_context
 from .input_patch_backend import install_runtime_input_patch
 from .request_key_compat import get_scheduled_token_items
 from .runner_compression_actions import execute_runner_compression_actions
@@ -346,6 +347,38 @@ class TriAttentionModelRunner:
                 effective_kv = actual_kv
             else:
                 effective_kv = actual_kv + scheduled_tokens_i
+            if should_guard_fast_recency_long_context(
+                config=self.config,
+                effective_tokens=effective_kv,
+                prefill_len=prefill_len,
+            ):
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                    if hasattr(self.state_store, "mark_compression_skipped"):
+                        self.state_store.mark_compression_skipped(
+                            req_id=req_id,
+                            reason="fast_recency_long_context_guard",
+                            step=self._last_step,
+                        )
+                    self._logger.debug(
+                        "TriAttention dropped long-context fast-recency "
+                        "trigger: req=%s effective_kv=%d prefill_len=%d "
+                        "guard_tokens=%d scheduled=%d from_blocks=%s",
+                        req_id,
+                        effective_kv,
+                        prefill_len,
+                        int(
+                            getattr(
+                                self.config,
+                                "fast_recency_long_context_guard_tokens",
+                                0,
+                            )
+                            or 0
+                        ),
+                        scheduled_tokens_i,
+                        kv_from_blocks,
+                    )
+                continue
             if effective_kv < threshold:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)

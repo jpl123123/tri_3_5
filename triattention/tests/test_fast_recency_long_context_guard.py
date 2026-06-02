@@ -26,6 +26,19 @@ def test_fast_recency_guard_allows_10k_benchmark_context():
     )
 
 
+def test_fast_recency_guard_boundary():
+    assert not should_guard_fast_recency_long_context(
+        config=_config(),
+        effective_tokens=16383,
+        prefill_len=10000,
+    )
+    assert should_guard_fast_recency_long_context(
+        config=_config(),
+        effective_tokens=16384,
+        prefill_len=10000,
+    )
+
+
 def test_fast_recency_guard_blocks_20k_accuracy_risk():
     assert should_guard_fast_recency_long_context(
         config=_config(),

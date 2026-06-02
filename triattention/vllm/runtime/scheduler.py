@@ -16,6 +16,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
 from .effective_len_tracker import EffectiveCacheLenTracker
+from .fast_recency_guard import should_guard_fast_recency_long_context
 from .kv_allocation_sync import (
     clear_request_allocation_sync_state,
     prepare_request_effective_num_computed,
@@ -273,6 +274,15 @@ class TriAttentionScheduler(Scheduler):
                 prefill_len = self._resolve_prefill_len(req_id)
                 self._prefill_lens[req_id] = prefill_len
                 self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+            if should_guard_fast_recency_long_context(
+                config=self.triattention_config,
+                effective_tokens=max(
+                    int(getattr(request, "num_computed_tokens", 0) or 0),
+                    prefill_len,
+                ),
+                prefill_len=prefill_len,
+            ):
+                continue
             if (
                 _should_defer_prefill_compression_for_scheduler(self)
                 and scheduled_tokens_i > 1
