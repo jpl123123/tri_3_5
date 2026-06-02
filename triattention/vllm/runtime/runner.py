@@ -30,6 +30,7 @@ from .runner_state_updates import (
 )
 from .perf_profile import TriAttentionPerfProfile
 from .phase_profile import (
+    make_timed_wrapper,
     phase_elapsed_ms,
     phase_now,
     phase_profile_enabled,
@@ -101,6 +102,7 @@ class TriAttentionModelRunner:
         self._runtime_input_patch_installed = False
         if bool(getattr(self.config, "preinstall_input_patch", True)):
             self._runtime_input_patch_installed = bool(install_runtime_input_patch())
+        self._install_base_runner_phase_probes()
         self._allowed_strict_skip_reasons = {
             "under_budget",
             "prefill_incomplete",
@@ -115,6 +117,59 @@ class TriAttentionModelRunner:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base_runner, name)
+
+    def _install_base_runner_phase_probes(self) -> None:
+        """Attach fallback timing probes directly to the concrete runner instance."""
+
+        method_phases = {
+            "_prepare_inputs": "base_runner_prepare_inputs",
+            "prepare_inputs": "base_runner_prepare_inputs",
+            "_build_attention_metadata": "base_runner_build_attention_metadata",
+            "_model_forward": "base_runner_model_forward",
+            "_preprocess": "base_runner_preprocess",
+            "_determine_batch_execution_and_padding": "base_runner_determine_batch",
+            "_sync_batch_across_dp": "base_runner_sync_batch_across_dp",
+            "_sample": "base_runner_sample",
+            "_bookkeeping_sync": "base_runner_bookkeeping_sync",
+            "_update_states": "base_runner_update_states",
+            "_update_states_after_model_execute": "base_runner_update_states_after_execute",
+            "postprocess": "base_runner_postprocess",
+        }
+        installed: list[str] = []
+        for method_name, phase_name in method_phases.items():
+            original = getattr(self._base_runner, method_name, None)
+            if not callable(original) or bool(
+                getattr(original, "_triattention_phase_timed", False)
+            ):
+                continue
+            try:
+                setattr(
+                    self._base_runner,
+                    method_name,
+                    make_timed_wrapper(phase_name, original),
+                )
+                installed.append(method_name)
+            except Exception:
+                continue
+        model = getattr(self._base_runner, "model", None)
+        compute_logits = getattr(model, "compute_logits", None)
+        if callable(compute_logits) and not bool(
+            getattr(compute_logits, "_triattention_phase_timed", False)
+        ):
+            try:
+                setattr(
+                    model,
+                    "compute_logits",
+                    make_timed_wrapper("base_model_compute_logits", compute_logits),
+                )
+                installed.append("model.compute_logits")
+            except Exception:
+                pass
+        if installed and bool(getattr(self._perf, "enabled", False)):
+            self._logger.info(
+                "TriAttention installed base runner phase probes: %s",
+                ",".join(installed),
+            )
 
     def _register_new_requests(self, scheduler_output: Any) -> None:
         register_new_requests(

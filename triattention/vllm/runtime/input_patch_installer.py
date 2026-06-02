@@ -23,6 +23,15 @@ _ORIGINAL_PREPARE_POS_SEQ_LENS: Callable[..., Any] | None = None
 _ORIGINAL_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
 _ORIGINAL_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_EXECUTE_MODEL: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_SAMPLE_TOKENS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_BUILD_ATTENTION_METADATA: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_MODEL_FORWARD: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_SAMPLE: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_BOOKKEEPING_SYNC: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_DETERMINE_BATCH: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_PREPROCESS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_SYNC_BATCH_ACROSS_DP: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_EXECUTE_MODEL: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_PREPARE_INPUTS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_POSTPROCESS: Callable[..., Any] | None = None
@@ -47,6 +56,28 @@ def _is_triattention_patched(func: Any) -> bool:
     return bool(getattr(func, "_triattention_patched", False))
 
 
+def _install_timed_method(
+    *,
+    cls: Any,
+    method_name: str,
+    phase: str,
+    storage_name: str,
+    details_fn: Callable[[tuple[Any, ...], dict[str, Any], Any], dict[str, Any] | None]
+    | None,
+    patched_targets: list[str],
+    target_label: str,
+) -> bool:
+    if globals().get(storage_name) is not None:
+        return False
+    original = getattr(cls, method_name, None)
+    if original is None:
+        return False
+    globals()[storage_name] = original
+    setattr(cls, method_name, make_timed_wrapper(phase, original, details_fn))
+    patched_targets.append(target_label)
+    return True
+
+
 def _safe_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -69,6 +100,35 @@ def _scheduler_output_details(scheduler_output: Any) -> dict[str, Any]:
     }
 
 
+def _array_max(value: Any) -> int | None:
+    try:
+        return int(value.max(initial=0))
+    except TypeError:
+        try:
+            return int(value.max())
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _numel(value: Any) -> int | None:
+    try:
+        return int(value.numel())
+    except Exception:
+        try:
+            return int(value.size)
+        except Exception:
+            return None
+
+
+def _shape0(value: Any) -> int | None:
+    try:
+        return int(value.shape[0])
+    except Exception:
+        return None
+
+
 def _execute_model_details(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -79,6 +139,20 @@ def _execute_model_details(
     if scheduler_output is None and len(args) >= 2:
         scheduler_output = args[1]
     return _scheduler_output_details(scheduler_output)
+
+
+def _sample_tokens_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del kwargs
+    self_obj = args[0] if args else None
+    input_batch = getattr(self_obj, "input_batch", None)
+    return {
+        "num_reqs": _safe_int(getattr(input_batch, "num_reqs", None)),
+        "result_type": type(result).__name__ if result is not None else "None",
+    }
 
 
 def _prepare_inputs_details(
@@ -112,6 +186,168 @@ def _prepare_inputs_details(
             }
         )
     return details
+
+
+def _v1_attention_metadata_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    self_obj = args[0] if args else None
+    num_tokens = kwargs.get("num_tokens")
+    num_tokens_padded = kwargs.get("num_tokens_padded")
+    num_reqs = kwargs.get("num_reqs")
+    num_reqs_padded = kwargs.get("num_reqs_padded")
+    max_query_len = kwargs.get("max_query_len")
+    if len(args) >= 2 and num_tokens is None:
+        num_tokens = args[1]
+    if len(args) >= 3 and num_reqs is None:
+        num_reqs = args[2]
+    if len(args) >= 4 and max_query_len is None:
+        max_query_len = args[3]
+    seq_lens = getattr(self_obj, "seq_lens", None)
+    seq_lens_np = getattr(seq_lens, "np", None)
+    return {
+        "num_reqs": _safe_int(num_reqs),
+        "num_reqs_padded": _safe_int(num_reqs_padded),
+        "num_tokens": _safe_int(num_tokens),
+        "num_tokens_padded": _safe_int(num_tokens_padded),
+        "max_query_len": _safe_int(max_query_len),
+        "seq_lens_np_max": _array_max(
+            seq_lens_np[: int(num_reqs)] if seq_lens_np is not None and num_reqs else seq_lens_np
+        ),
+        "use_spec_decode": int(bool(kwargs.get("use_spec_decode", False))),
+    }
+
+
+def _v1_model_forward_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    num_tokens_padded = kwargs.get("num_tokens_padded")
+    input_ids = kwargs.get("input_ids")
+    positions = kwargs.get("positions")
+    if len(args) >= 2 and num_tokens_padded is None:
+        num_tokens_padded = args[1]
+    if len(args) >= 3 and input_ids is None:
+        input_ids = args[2]
+    if len(args) >= 4 and positions is None:
+        positions = args[3]
+    return {
+        "num_tokens_padded": _safe_int(num_tokens_padded),
+        "input_ids": _numel(input_ids),
+        "positions": _numel(positions),
+    }
+
+
+def _v1_sample_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    logits = kwargs.get("logits")
+    spec_decode_metadata = kwargs.get("spec_decode_metadata")
+    if len(args) >= 2 and logits is None:
+        logits = args[1]
+    if len(args) >= 3 and spec_decode_metadata is None:
+        spec_decode_metadata = args[2]
+    return {
+        "logits_rows": _shape0(logits),
+        "spec_decode": int(spec_decode_metadata is not None),
+    }
+
+
+def _v1_bookkeeping_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    del result
+    scheduler_output = kwargs.get("scheduler_output")
+    sampler_output = kwargs.get("sampler_output")
+    if scheduler_output is None and len(args) >= 2:
+        scheduler_output = args[1]
+    if sampler_output is None and len(args) >= 3:
+        sampler_output = args[2]
+    sampled = getattr(sampler_output, "sampled_token_ids", None)
+    details = _scheduler_output_details(scheduler_output)
+    details.update({"sampled_rows": _shape0(sampled)})
+    return details
+
+
+def _v1_determine_batch_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    num_tokens = kwargs.get("num_tokens")
+    num_reqs = kwargs.get("num_reqs")
+    max_num_scheduled_tokens = kwargs.get("max_num_scheduled_tokens")
+    if len(args) >= 2 and num_tokens is None:
+        num_tokens = args[1]
+    if len(args) >= 3 and num_reqs is None:
+        num_reqs = args[2]
+    if len(args) >= 4 and max_num_scheduled_tokens is None:
+        max_num_scheduled_tokens = args[3]
+    cudagraph_mode = None
+    batch_desc = None
+    should_ubatch = None
+    if isinstance(result, tuple):
+        if len(result) > 0:
+            cudagraph_mode = result[0]
+        if len(result) > 1:
+            batch_desc = result[1]
+        if len(result) > 2:
+            should_ubatch = result[2]
+    return {
+        "num_reqs": _safe_int(num_reqs),
+        "num_tokens": _safe_int(num_tokens),
+        "max_scheduled": _safe_int(max_num_scheduled_tokens),
+        "cg_mode": cudagraph_mode,
+        "batch_tokens": _safe_int(getattr(batch_desc, "num_tokens", None)),
+        "batch_reqs": _safe_int(getattr(batch_desc, "num_reqs", None)),
+        "ubatch": int(bool(should_ubatch)) if should_ubatch is not None else None,
+    }
+
+
+def _v1_preprocess_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    scheduler_output = kwargs.get("scheduler_output")
+    num_tokens = kwargs.get("num_tokens")
+    if scheduler_output is None and len(args) >= 2:
+        scheduler_output = args[1]
+    if len(args) >= 3 and num_tokens is None:
+        num_tokens = args[2]
+    details = _scheduler_output_details(scheduler_output)
+    details.update({"num_tokens_arg": _safe_int(num_tokens)})
+    if isinstance(result, tuple):
+        details["result_parts"] = len(result)
+    return details
+
+
+def _v1_sync_batch_details(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    result: Any,
+) -> dict[str, Any] | None:
+    num_tokens_padded = kwargs.get("num_tokens_padded")
+    cudagraph_mode = kwargs.get("cudagraph_mode")
+    if len(args) >= 2 and num_tokens_padded is None:
+        num_tokens_padded = args[1]
+    if len(args) >= 3 and cudagraph_mode is None:
+        cudagraph_mode = args[2]
+    return {
+        "num_tokens_padded": _safe_int(num_tokens_padded),
+        "cg_mode": cudagraph_mode,
+        "result_type": type(result).__name__ if result is not None else "None",
+    }
 
 
 def _postprocess_details(
@@ -167,6 +403,11 @@ def install_runtime_input_patch_hooks() -> bool:
     """
     global _PATCH_INSTALLED, _ORIGINAL_PREPARE_POS_SEQ_LENS, _ORIGINAL_COMPUTE_SLOT_MAPPINGS
     global _ORIGINAL_V1_PREPARE_INPUTS, _ORIGINAL_ASCEND_V1_PREPARE_INPUTS
+    global _ORIGINAL_ASCEND_V1_EXECUTE_MODEL, _ORIGINAL_ASCEND_V1_SAMPLE_TOKENS
+    global _ORIGINAL_ASCEND_V1_BUILD_ATTENTION_METADATA
+    global _ORIGINAL_ASCEND_V1_MODEL_FORWARD, _ORIGINAL_ASCEND_V1_SAMPLE
+    global _ORIGINAL_ASCEND_V1_BOOKKEEPING_SYNC, _ORIGINAL_ASCEND_V1_DETERMINE_BATCH
+    global _ORIGINAL_ASCEND_V1_PREPROCESS, _ORIGINAL_ASCEND_V1_SYNC_BATCH_ACROSS_DP
     global _ORIGINAL_ASCEND_V2_EXECUTE_MODEL, _ORIGINAL_ASCEND_V2_PREPARE_INPUTS
     global _ORIGINAL_ASCEND_V2_POSTPROCESS
     global _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS
@@ -228,6 +469,109 @@ def install_runtime_input_patch_hooks() -> bool:
         except Exception:
             ascend_model_runner_v1 = None
         if ascend_model_runner_v1 is not None:
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="execute_model",
+                phase="ascend_v1_execute_model",
+                storage_name="_ORIGINAL_ASCEND_V1_EXECUTE_MODEL",
+                details_fn=_execute_model_details,
+                patched_targets=patched_targets,
+                target_label="vllm_ascend.worker.model_runner_v1.NPUModelRunner.execute_model",
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="sample_tokens",
+                phase="ascend_v1_sample_tokens",
+                storage_name="_ORIGINAL_ASCEND_V1_SAMPLE_TOKENS",
+                details_fn=_sample_tokens_details,
+                patched_targets=patched_targets,
+                target_label="vllm_ascend.worker.model_runner_v1.NPUModelRunner.sample_tokens",
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_build_attention_metadata",
+                phase="ascend_v1_build_attention_metadata",
+                storage_name="_ORIGINAL_ASCEND_V1_BUILD_ATTENTION_METADATA",
+                details_fn=_v1_attention_metadata_details,
+                patched_targets=patched_targets,
+                target_label=(
+                    "vllm_ascend.worker.model_runner_v1.NPUModelRunner."
+                    "_build_attention_metadata"
+                ),
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_model_forward",
+                phase="ascend_v1_model_forward",
+                storage_name="_ORIGINAL_ASCEND_V1_MODEL_FORWARD",
+                details_fn=_v1_model_forward_details,
+                patched_targets=patched_targets,
+                target_label="vllm_ascend.worker.model_runner_v1.NPUModelRunner._model_forward",
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_sample",
+                phase="ascend_v1_sample",
+                storage_name="_ORIGINAL_ASCEND_V1_SAMPLE",
+                details_fn=_v1_sample_details,
+                patched_targets=patched_targets,
+                target_label="vllm_ascend.worker.model_runner_v1.NPUModelRunner._sample",
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_bookkeeping_sync",
+                phase="ascend_v1_bookkeeping_sync",
+                storage_name="_ORIGINAL_ASCEND_V1_BOOKKEEPING_SYNC",
+                details_fn=_v1_bookkeeping_details,
+                patched_targets=patched_targets,
+                target_label=(
+                    "vllm_ascend.worker.model_runner_v1.NPUModelRunner."
+                    "_bookkeeping_sync"
+                ),
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_determine_batch_execution_and_padding",
+                phase="ascend_v1_determine_batch_execution",
+                storage_name="_ORIGINAL_ASCEND_V1_DETERMINE_BATCH",
+                details_fn=_v1_determine_batch_details,
+                patched_targets=patched_targets,
+                target_label=(
+                    "vllm_ascend.worker.model_runner_v1.NPUModelRunner."
+                    "_determine_batch_execution_and_padding"
+                ),
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_preprocess",
+                phase="ascend_v1_preprocess",
+                storage_name="_ORIGINAL_ASCEND_V1_PREPROCESS",
+                details_fn=_v1_preprocess_details,
+                patched_targets=patched_targets,
+                target_label="vllm_ascend.worker.model_runner_v1.NPUModelRunner._preprocess",
+            ):
+                patched_any = True
+            if _install_timed_method(
+                cls=ascend_model_runner_v1.NPUModelRunner,
+                method_name="_sync_batch_across_dp",
+                phase="ascend_v1_sync_batch_across_dp",
+                storage_name="_ORIGINAL_ASCEND_V1_SYNC_BATCH_ACROSS_DP",
+                details_fn=_v1_sync_batch_details,
+                patched_targets=patched_targets,
+                target_label=(
+                    "vllm_ascend.worker.model_runner_v1.NPUModelRunner."
+                    "_sync_batch_across_dp"
+                ),
+            ):
+                patched_any = True
+
             original_ascend_v1_prepare_inputs = getattr(
                 ascend_model_runner_v1.NPUModelRunner,
                 "_prepare_inputs",

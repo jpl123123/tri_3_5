@@ -12,6 +12,12 @@ from typing import Any, Callable
 import numpy as np
 
 from . import input_patch_state as _patch_state
+from .phase_profile import (
+    phase_elapsed_ms,
+    phase_now,
+    phase_profile_enabled,
+    record_phase,
+)
 
 
 def _debug_drop_pos_delta() -> bool:
@@ -93,39 +99,67 @@ def make_patched_v1_prepare_inputs(
     original_prepare_inputs: Callable[..., Any],
 ) -> Callable[..., Any]:
     def _patched_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
-        out = original_prepare_inputs(self, scheduler_output, num_scheduled_tokens)
+        profile_enabled = phase_profile_enabled()
+        t0 = phase_now() if profile_enabled else 0.0
+        overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
+        seq_applied = False
+        slot_applied = False
+        total_num_scheduled_tokens = 0
+        num_reqs = 0
+        try:
+            out = original_prepare_inputs(self, scheduler_output, num_scheduled_tokens)
 
-        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
+            if not overrides_enabled:
+                return out
+
+            _patch_state.mark_active_effective_overrides_consumed()
+
+            total_num_scheduled_tokens = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0))
+            num_reqs = int(getattr(self.input_batch, "num_reqs", 0))
+            if total_num_scheduled_tokens <= 0 or num_reqs <= 0:
+                return out
+
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+            positions_np = self.positions.np[:total_num_scheduled_tokens]
+
+            slot_positions_np = _build_effective_slot_positions(
+                positions_np=positions_np,
+                req_indices=req_indices,
+            )
+            if slot_positions_np is not None:
+                self.input_batch.block_table.compute_slot_mapping(req_indices, slot_positions_np)
+                self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+                slot_applied = True
+            seq_applied = _apply_sparse_seq_len_overrides_in_place(
+                seq_lens_np=self.seq_lens.np,
+                num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_reqs=num_reqs,
+            )
+            if seq_applied:
+                self.seq_lens.np[num_reqs:].fill(0)
+                self.seq_lens.copy_to_gpu()
+
             return out
-
-        _patch_state.mark_active_effective_overrides_consumed()
-
-        total_num_scheduled_tokens = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0))
-        num_reqs = int(getattr(self.input_batch, "num_reqs", 0))
-        if total_num_scheduled_tokens <= 0 or num_reqs <= 0:
-            return out
-
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
-        original_positions_np = positions_np.copy()
-
-        slot_positions_np = _build_effective_slot_positions(
-            positions_np=positions_np,
-            req_indices=req_indices,
-        )
-        if slot_positions_np is not None:
-            self.input_batch.block_table.compute_slot_mapping(req_indices, slot_positions_np)
-            self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-        seq_applied = _apply_sparse_seq_len_overrides_in_place(
-            seq_lens_np=self.seq_lens.np,
-            num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
-            num_scheduled_tokens=num_scheduled_tokens,
-            num_reqs=num_reqs,
-        )
-        if seq_applied:
-            self.seq_lens.np[num_reqs:].fill(0)
-            self.seq_lens.copy_to_gpu()
-
-        return out
+        finally:
+            if profile_enabled:
+                try:
+                    max_sched = int(num_scheduled_tokens.max(initial=0))
+                except TypeError:
+                    max_sched = int(num_scheduled_tokens.max())
+                except Exception:
+                    max_sched = None
+                record_phase(
+                    "ascend_v1_prepare_inputs",
+                    phase_elapsed_ms(t0),
+                    {
+                        "num_reqs": num_reqs,
+                        "total_tokens": total_num_scheduled_tokens,
+                        "max_scheduled": max_sched,
+                        "overrides": int(overrides_enabled),
+                        "seq_override": int(seq_applied),
+                        "slot_override": int(slot_applied),
+                    },
+                )
 
     return _patched_prepare_inputs
