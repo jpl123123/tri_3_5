@@ -254,6 +254,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             "prefill_min_reclaim_blocks_on_ascend=%d "
             "prefill_max_compressions_on_ascend=%d "
             "fast_recency_only=%s fast_recency_accuracy_guard=%s "
+            "fast_recency_long_context_guard=%s "
+            "fast_recency_long_context_guard_tokens=%d "
             "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
             "build=%s",
             "eagerly" if installing_during_init else "lazily",
@@ -270,6 +272,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
             bool(getattr(config, "fast_recency_only", False)),
             bool(getattr(config, "fast_recency_accuracy_guard", True)),
+            bool(getattr(config, "fast_recency_long_context_guard", True)),
+            int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0),
             bool(getattr(config, "enable_zero_copy_recency", True)),
             bool(getattr(config, "zero_copy_recency_only_on_ascend", True)),
             RUNTIME_BUILD_ID,

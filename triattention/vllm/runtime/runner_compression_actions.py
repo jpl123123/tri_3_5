@@ -214,6 +214,7 @@ def execute_runner_compression_actions(
                 "prefill_incomplete",
                 "prefill_compression_limit",
                 "zero_copy_recency_not_ready",
+                "fast_recency_long_context_guard",
             }
             else logger.info
         )

@@ -21,6 +21,7 @@ from .hook_group_pipeline import (
     try_build_recency_tail_block_remap,
 )
 from .hook_preflight import resolve_hook_compaction_inputs, resolve_hook_request_context
+from .fast_recency_guard import should_guard_fast_recency_long_context
 from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
 from .selector_hf import build_triattention_selector as _build_triattention_selector_impl
 from .signals import CompressionSignal
@@ -106,6 +107,22 @@ def make_runner_compression_hook(
                 "applied": False,
                 "reason": "under_budget",
                 "cache_len_after": effective_tokens,
+            }
+        signal_prefill_len = int(getattr(signal, "prefill_len", 0) or 0)
+        if should_guard_fast_recency_long_context(
+            config=config,
+            effective_tokens=effective_tokens,
+            prefill_len=signal_prefill_len,
+        ):
+            return {
+                "applied": False,
+                "reason": "fast_recency_long_context_guard",
+                "cache_len_after": effective_tokens,
+                "effective_tokens": int(effective_tokens),
+                "prefill_len": signal_prefill_len,
+                "guard_tokens": int(
+                    getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0
+                ),
             }
 
         if not config.enable_experimental_kv_compaction:

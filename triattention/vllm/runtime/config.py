@@ -49,6 +49,8 @@ class TriAttentionRuntimeConfig:
     score_layer_stride: int = 1
     fast_recency_only: bool = False
     fast_recency_accuracy_guard: bool = True
+    fast_recency_long_context_guard: bool = True
+    fast_recency_long_context_guard_tokens: int = 16384
     min_reclaim_blocks: int = 1
     min_reclaim_blocks_on_ascend: int = 8
     prefill_min_reclaim_blocks_on_ascend: int = 32
@@ -184,6 +186,14 @@ class TriAttentionRuntimeConfig:
             fast_recency_accuracy_guard=maybe_bool(
                 "FAST_RECENCY_ACCURACY_GUARD",
                 fast_recency_accuracy_guard_default,
+            ),
+            fast_recency_long_context_guard=maybe_bool(
+                "FAST_RECENCY_LONG_CONTEXT_GUARD",
+                cls.fast_recency_long_context_guard,
+            ),
+            fast_recency_long_context_guard_tokens=maybe_int(
+                "FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS",
+                cls.fast_recency_long_context_guard_tokens,
             ),
             min_reclaim_blocks=maybe_int(
                 "MIN_RECLAIM_BLOCKS",
@@ -348,6 +358,11 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "disable_top_n_high_freq must be >= 0, "
                 f"got {self.disable_top_n_high_freq}"
+            )
+        if self.fast_recency_long_context_guard_tokens < 0:
+            raise ValueError(
+                "fast_recency_long_context_guard_tokens must be >= 0, "
+                f"got {self.fast_recency_long_context_guard_tokens}"
             )
         if not (0.0 < self.effective_len_regression_ratio <= 1.0):
             raise ValueError(

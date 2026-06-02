@@ -3,7 +3,6 @@
 from .config import TriAttentionRuntimeConfig
 from .effective_len_tracker import EffectiveCacheLenTracker
 from .executor import CompressionExecutionResult, CompressionExecutor
-from .hook_impl import install_runner_compression_hook
 from .plan_models import KeepPlan, PlacementPlan, ReclaimEvent, ReclaimGroup
 from .planner import CompressionPlanner
 from .signals import CompressionSignal
@@ -28,3 +27,11 @@ __all__ = [
     "RequestStateStore",
     "install_runner_compression_hook",
 ]
+
+
+def __getattr__(name: str):
+    if name == "install_runner_compression_hook":
+        from .hook_impl import install_runner_compression_hook
+
+        return install_runner_compression_hook
+    raise AttributeError(name)
