@@ -31,6 +31,7 @@ def activate_effective_sparse_overrides(
     single_pos_delta: int,
     expected_req_row_indices: tuple[int, ...] | None = None,
     expected_query_lens: tuple[int, ...] | None = None,
+    packed_pos_deltas: tuple[int, ...] | None = None,
 ) -> None:
     set_active_effective_overrides_enabled(True)
     # Dense overrides intentionally disabled in normal path.
@@ -43,6 +44,7 @@ def activate_effective_sparse_overrides(
         single_effective_pos_delta=single_pos_delta,
         expected_req_row_indices=expected_req_row_indices,
         expected_query_lens=expected_query_lens,
+        packed_pos_deltas=packed_pos_deltas,
     )
 
 
@@ -55,6 +57,7 @@ def clear_effective_overrides() -> None:
         single_effective_pos_delta=0,
         expected_req_row_indices=None,
         expected_query_lens=None,
+        packed_pos_deltas=None,
     )
     set_active_effective_positions(None)
     set_active_effective_num_computed_tokens(None)

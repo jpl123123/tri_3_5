@@ -37,6 +37,15 @@ def _build_effective_slot_positions_tensor(
         out = positions.clone()
         out.add_(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
         return out
+    packed_deltas = _patch_state.get_active_packed_pos_deltas(positions.device)
+    if packed_deltas is not None:
+        total_query_tokens = int(packed_deltas.numel())
+        if total_query_tokens > 0 and total_query_tokens <= int(positions.numel()):
+            out = positions.clone()
+            out[:total_query_tokens].add_(
+                packed_deltas.to(device=positions.device, dtype=out.dtype)
+            )
+            return out
     sparse_pos_deltas = _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX
     if not sparse_pos_deltas:
         return None

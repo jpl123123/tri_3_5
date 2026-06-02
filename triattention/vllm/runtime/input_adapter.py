@@ -29,6 +29,7 @@ class EffectiveInputOverrides:
     single_pos_delta: int
     expected_req_row_indices: tuple[int, ...] | None = None
     expected_query_lens: tuple[int, ...] | None = None
+    packed_pos_deltas: tuple[int, ...] | None = None
 
     def activate(self) -> None:
         activate_effective_sparse_overrides(
@@ -38,6 +39,7 @@ class EffectiveInputOverrides:
             single_pos_delta=self.single_pos_delta,
             expected_req_row_indices=self.expected_req_row_indices,
             expected_query_lens=self.expected_query_lens,
+            packed_pos_deltas=self.packed_pos_deltas,
         )
 
     @staticmethod
@@ -78,6 +80,7 @@ def prepare_effective_input_overrides(
     if isinstance(req_id_to_index, dict):
         row_indices: list[int] = []
         q_lens: list[int] = []
+        packed_deltas: list[int] = []
         sparse_override_req_rows = set(seq_base_map or {})
         sparse_override_req_rows.update(pos_delta_map or {})
         for _raw_key, req_id, scheduled_tokens in scheduled_items:
@@ -85,18 +88,29 @@ def prepare_effective_input_overrides(
             if not isinstance(req_idx, int):
                 continue
             req_idx = int(req_idx)
+            q_len = int(scheduled_tokens)
+            delta = int((pos_delta_map or {}).get(req_idx, 0))
+            if q_len > 0:
+                packed_deltas.extend([delta] * q_len)
             if sparse_override_req_rows and req_idx not in sparse_override_req_rows:
                 continue
             row_indices.append(req_idx)
-            q_lens.append(int(scheduled_tokens))
+            q_lens.append(q_len)
         if row_indices:
             expected_req_row_indices = tuple(row_indices)
             expected_query_lens = tuple(q_lens)
+        packed_pos_deltas = (
+            tuple(packed_deltas)
+            if packed_deltas and any(delta != 0 for delta in packed_deltas)
+            else None
+        )
     elif seq_base_map or pos_delta_map:
         raise RuntimeError(
             "TRIATTN_EXPECTED_REQ_ROW_INDEX_UNAVAILABLE:"
             "req_id_to_index_missing_while_overrides_active"
         )
+    else:
+        packed_pos_deltas = None
 
     return EffectiveInputOverrides(
         seq_base_map=seq_base_map,
@@ -105,4 +119,5 @@ def prepare_effective_input_overrides(
         single_pos_delta=single_pos_delta,
         expected_req_row_indices=expected_req_row_indices,
         expected_query_lens=expected_query_lens,
+        packed_pos_deltas=packed_pos_deltas,
     )

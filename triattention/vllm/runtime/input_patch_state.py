@@ -26,6 +26,8 @@ ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU: torch.Tensor | None = None
 ACTIVE_EXPECTED_REQ_ROW_INDICES_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
 ACTIVE_EXPECTED_QUERY_LENS_CPU: torch.Tensor | None = None
 ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
+ACTIVE_PACKED_POS_DELTAS_CPU: torch.Tensor | None = None
+ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
 ACTIVE_EFFECTIVE_OVERRIDES_ENABLED: bool = False
 ACTIVE_EFFECTIVE_OVERRIDES_CONSUMED: bool = False
 ACTIVE_EFFECTIVE_MAPPING_VALIDATED: bool = False
@@ -134,6 +136,7 @@ def set_active_effective_sparse_overrides(
     single_effective_pos_delta: int = 0,
     expected_req_row_indices: tuple[int, ...] | None = None,
     expected_query_lens: tuple[int, ...] | None = None,
+    packed_pos_deltas: tuple[int, ...] | None = None,
 ) -> None:
     global ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX, ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX
     global ACTIVE_EFFECTIVE_BASE_LOOKUP_KEYS_CPU, ACTIVE_EFFECTIVE_BASE_LOOKUP_VALS_CPU
@@ -142,6 +145,7 @@ def set_active_effective_sparse_overrides(
     global ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE, ACTIVE_SINGLE_EFFECTIVE_POS_DELTA
     global ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU, ACTIVE_EXPECTED_REQ_ROW_INDICES_DEVICE_CACHE
     global ACTIVE_EXPECTED_QUERY_LENS_CPU, ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE
+    global ACTIVE_PACKED_POS_DELTAS_CPU, ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE
     ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX = effective_base_by_req_idx
     ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX = effective_pos_delta_by_req_idx
     (
@@ -172,6 +176,14 @@ def set_active_effective_sparse_overrides(
     else:
         ACTIVE_EXPECTED_QUERY_LENS_CPU = None
     ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE = {}
+    if packed_pos_deltas:
+        ACTIVE_PACKED_POS_DELTAS_CPU = torch.as_tensor(
+            [int(v) for v in packed_pos_deltas],
+            dtype=torch.long,
+        )
+    else:
+        ACTIVE_PACKED_POS_DELTAS_CPU = None
+    ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE = {}
 
 
 def get_active_effective_base_lookup_tensors(
@@ -209,4 +221,12 @@ def get_active_expected_query_lens(device: torch.device) -> torch.Tensor | None:
         values_cpu=ACTIVE_EXPECTED_QUERY_LENS_CPU,
         device=device,
         cache=ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE,
+    )
+
+
+def get_active_packed_pos_deltas(device: torch.device) -> torch.Tensor | None:
+    return _resolve_index_vector_for_device(
+        values_cpu=ACTIVE_PACKED_POS_DELTAS_CPU,
+        device=device,
+        cache=ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE,
     )

@@ -27,6 +27,19 @@ def _debug_early_install_proxy_enabled() -> bool:
     return os.environ.get("TRIATTN_DEBUG_EARLY_INSTALL_PROXY", "0") == "1"
 
 
+def _should_early_install_proxy(worker: Any, config: TriAttentionRuntimeConfig) -> bool:
+    if _debug_early_install_proxy_enabled():
+        return True
+    if not bool(getattr(config, "early_install_proxy_on_ascend", True)):
+        return False
+    model_runner = getattr(worker, "model_runner", None)
+    return (
+        is_ascend_runtime(worker)
+        or is_ascend_runtime(model_runner)
+        or is_ascend_environment_available()
+    )
+
+
 def _maybe_backfill_model_path(worker: Any, config: TriAttentionRuntimeConfig) -> None:
     if config.model_path is not None:
         return
@@ -152,8 +165,12 @@ class TriAttentionWorker(VLLMGPUWorker):
         self._triattention_runtime_config = TriAttentionRuntimeConfig.from_env()
         _maybe_backfill_model_path(self, self._triattention_runtime_config)
         self._triattention_runner_proxy_installed = False
-        if _debug_early_install_proxy_enabled():
-            self._ensure_triattention_runner_proxy()
+        if _should_early_install_proxy(self, self._triattention_runtime_config):
+            self._triattention_installing_during_init = True
+            try:
+                self._ensure_triattention_runner_proxy()
+            finally:
+                self._triattention_installing_during_init = False
             logger.debug("TriAttentionWorker: eagerly installed runner proxy during init_device")
 
     def _ensure_triattention_runner_proxy(self) -> None:
@@ -162,6 +179,7 @@ class TriAttentionWorker(VLLMGPUWorker):
         if isinstance(self.model_runner, TriAttentionModelRunner):
             self._triattention_runner_proxy_installed = True
             return
+        installing_during_init = bool(getattr(self, "_triattention_installing_during_init", False))
         config = getattr(self, "_triattention_runtime_config", None) or TriAttentionRuntimeConfig.from_env()
         _maybe_backfill_model_path(self, config)
         base_runner = self.model_runner
@@ -172,12 +190,13 @@ class TriAttentionWorker(VLLMGPUWorker):
         )
         self._triattention_runner_proxy_installed = True
         logger.info(
-            "TriAttentionWorker lazily injected runner proxy: budget=%d divide_length=%d "
+            "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
             "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
             "window_size=%s",
+            "eagerly" if installing_during_init else "lazily",
             config.kv_budget,
             config.divide_length,
-            "deferred",
+            "preinstalled" if config.preinstall_input_patch else "deferred",
             str(config.sparse_stats_path) if config.sparse_stats_path is not None else None,
             str(config.model_path) if config.model_path is not None else None,
             config.protect_prefill,

@@ -261,6 +261,8 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_SCORE_LAYER_STRIDE` | `1` | Score one layer every N layers before optional max-layer sampling |
 | `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` | `8` | On Ascend, wait until at least this many KV blocks can be reclaimed before triggering compression |
 | `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY` | `false` | Force an async batch-queue boundary around compression; normally keep disabled on Ascend for better TPOT |
+| `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND` | `true` | Install the TriAttention runner proxy during Ascend worker init so patching happens before measured requests |
+| `TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH` | `true` | Install input patches when the runner proxy is created instead of waiting for the first compressed request |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_KV_COMPACTION` | `true` | Enable in-place KV cache compaction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_BLOCK_RECLAIM` | `true` | Enable freed block reclamation |
 | `ENABLE_TRIATTENTION` | `true` | Master switch to enable/disable the plugin |

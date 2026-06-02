@@ -91,6 +91,8 @@ class TriAttentionModelRunner:
         self._pending_compression_events: list[dict[str, Any]] = []
         self._strict_no_downgrade = bool(self.config.enable_experimental_kv_compaction)
         self._runtime_input_patch_installed = False
+        if bool(getattr(self.config, "preinstall_input_patch", True)):
+            self._runtime_input_patch_installed = bool(install_runtime_input_patch())
         self._allowed_strict_skip_reasons = {
             "under_budget",
             "prefill_incomplete",

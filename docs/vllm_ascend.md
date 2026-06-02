@@ -43,6 +43,8 @@ export TRIATTN_RUNTIME_DIVIDE_LENGTH=128
 export TRIATTN_RUNTIME_WINDOW_SIZE=128
 export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=1
 export TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=0
+export TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=1
+export TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=1
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -151,6 +153,12 @@ set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for
 debugging with `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=1`.
+
+On Ascend, the runner proxy and input patches are installed during worker
+initialization by default. This avoids first-request patch installation and ACL
+graph replay in the measured request path. To compare against the older lazy
+behavior, set `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=0` and
+`TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=0`.
 
 ## Calibration Stats
 
