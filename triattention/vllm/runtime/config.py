@@ -45,7 +45,7 @@ class TriAttentionRuntimeConfig:
     defer_prefill_compression_on_ascend: bool = True
     score_chunk_max_tokens: int = 4096
     score_max_layers: int = 0
-    score_max_layers_on_ascend: int = 8
+    score_max_layers_on_ascend: int = 0
     score_layer_stride: int = 1
     fast_recency_only: bool = False
     fast_recency_accuracy_guard: bool = True

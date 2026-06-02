@@ -47,7 +47,6 @@ export TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=1
 export TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=1
 export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
 export TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND=0
-export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -118,10 +117,11 @@ the full prompt length.
 
 ## Performance Tuning
 
-On Ascend, the runtime keeps sparse-stat per-head selection for long-context
-quality, but caps scoring to a uniform layer sample by default. This keeps the
-visible KV layout aligned with the reference path while avoiding all-layer
-scoring overhead. For latency-sensitive serving, start with:
+On Ascend, the default path keeps sparse-stat per-head selection and all-layer
+scoring so the selected KV set matches the reference sparse path. The runtime
+still avoids the expensive full `[kept + dropped]` KV rewrite when tail blocks
+are physically reclaimed. For latency-sensitive serving after validating output
+quality, try:
 
 ```bash
 export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
@@ -131,11 +131,11 @@ export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 ```
 
-`TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` is used only when
-`TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set `SCORE_MAX_LAYERS` explicitly to force
-a value for every backend, or set the Ascend default to `0` to score all layers.
-Use `8` as the conservative first setting, then try `4` if quality is stable.
-The runtime log will include
+`TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` defaults to `0`, which means score
+all layers. It is used only when `TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set
+`SCORE_MAX_LAYERS` explicitly to force a value for every backend. Use `8` as
+the conservative first latency setting, then try `4` if quality is stable. The
+runtime log will include
 `selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
 
 `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` prevents very small compactions
