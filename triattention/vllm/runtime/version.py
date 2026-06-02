@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "ascend-prefill-throttle-v4-20260602"
+RUNTIME_BUILD_ID = "ascend-fast-recency-force-v5-20260602"
 
 
 def runtime_build_info() -> str:

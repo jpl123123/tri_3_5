@@ -253,7 +253,7 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_PRUNING_MODE` | `per_head` | Token selection strategy (`per_head` or `per_layer_per_head`) |
 | `TRIATTN_RUNTIME_SCORING_BACKEND` | `auto` | Scoring backend (`auto`, `triton`, `torch`/`pytorch`); `auto` uses PyTorch/torch_npu on vLLM-Ascend |
 | `TRIATTN_RUNTIME_FAST_RECENCY_ONLY` | `false` | Diagnostic low-overhead selector that keeps the most recent budget tokens without sparse-stat scoring |
-| `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` | `true` | When stats are configured, prefer sparse TriAttention selection over pure recency for long-context correctness |
+| `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` | `true` | When stats are configured, prefer sparse TriAttention selection over pure recency for long-context correctness. If `FAST_RECENCY_ONLY=1` is explicitly set and this variable is not set, the runtime treats the explicit fast-recency request as authoritative. |
 | `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY` | `true` | On vLLM-Ascend, use block-table tail remap for `FAST_RECENCY_ONLY` when the budget is block-aligned |
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |

@@ -100,7 +100,7 @@ Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.wor
 Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
-Recent builds also include `build=ascend-prefill-throttle-v4-20260602` in the
+Recent builds also include `build=ascend-fast-recency-force-v5-20260602` in the
 plugin, scheduler, and worker logs. If that build id is missing, the running
 container is still loading an older installed package or stale source path.
 
@@ -178,17 +178,25 @@ with the recency-only selector:
 export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
 ```
 
-This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. When
-`KV_BUDGET` is a multiple of `--block-size`, vLLM-Ascend uses a zero-copy tail
-block remap by default instead of copying KV tensors; the expected compression
-reason is `kv_compacted:zero_copy_tail`. To compare against the older copy path,
-set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
+This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. If
+`TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1` is explicitly set and
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` is not set, the runtime treats
+the explicit fast-recency request as authoritative even when
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is configured. Set
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` to force sparse-stat selection
+instead.
 
-For correctness on long prompts, `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD`
-defaults to `1`: when `TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, sparse-stat
-TriAttention selection is used instead of pure recency, even if
-`TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1` is left in the environment. Pure recency
-is a performance diagnostic and can degrade or repeat on 20k+ prompts.
+When `KV_BUDGET` is a multiple of `--block-size`, vLLM-Ascend uses a zero-copy
+tail block remap by default instead of copying KV tensors; the expected
+compression reason is `kv_compacted:zero_copy_tail` or a compression log with
+`selector=enabled:recency_only reclaim=remap_tail`. To compare against the older
+copy path, set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
+
+For correctness on long prompts, set
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` explicitly: when
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, sparse-stat TriAttention selection
+is used instead of pure recency. Pure recency is a performance diagnostic and
+can degrade quality on 20k+ prompts.
 
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for

@@ -146,7 +146,9 @@ class TriAttentionScheduler(Scheduler):
             "defer_prefill_on_ascend=%s score_max_layers=%d "
             "score_max_layers_on_ascend=%d "
             "prefill_min_reclaim_blocks_on_ascend=%d "
-            "prefill_max_compressions_on_ascend=%d build=%s",
+            "prefill_max_compressions_on_ascend=%d "
+            "fast_recency_only=%s fast_recency_accuracy_guard=%s "
+            "zero_copy_recency=%s build=%s",
             self.triattention_config.kv_budget,
             self.triattention_config.divide_length,
             self.triattention_config.min_reclaim_blocks_on_ascend,
@@ -158,6 +160,9 @@ class TriAttentionScheduler(Scheduler):
             self.triattention_config.score_max_layers_on_ascend,
             self.triattention_config.prefill_min_reclaim_blocks_on_ascend,
             self.triattention_config.prefill_max_compressions_on_ascend,
+            self.triattention_config.fast_recency_only,
+            self.triattention_config.fast_recency_accuracy_guard,
+            self.triattention_config.enable_zero_copy_recency,
             RUNTIME_BUILD_ID,
         )
 

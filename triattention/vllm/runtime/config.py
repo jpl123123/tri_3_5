@@ -105,6 +105,14 @@ class TriAttentionRuntimeConfig:
 
         sparse_stats_path_raw = maybe_str("SPARSE_STATS_PATH", None)
         model_path_raw = maybe_str("MODEL_PATH", None)
+        fast_recency_only = maybe_bool("FAST_RECENCY_ONLY", cls.fast_recency_only)
+        fast_recency_accuracy_guard_default = cls.fast_recency_accuracy_guard
+        if (
+            fast_recency_only
+            and _get_raw("FAST_RECENCY_ONLY") is not None
+            and _get_raw("FAST_RECENCY_ACCURACY_GUARD") is None
+        ):
+            fast_recency_accuracy_guard_default = False
 
         config = cls(
             kv_budget=maybe_int("KV_BUDGET", cls.kv_budget),
@@ -171,13 +179,10 @@ class TriAttentionRuntimeConfig:
                 "SCORE_LAYER_STRIDE",
                 cls.score_layer_stride,
             ),
-            fast_recency_only=maybe_bool(
-                "FAST_RECENCY_ONLY",
-                cls.fast_recency_only,
-            ),
+            fast_recency_only=fast_recency_only,
             fast_recency_accuracy_guard=maybe_bool(
                 "FAST_RECENCY_ACCURACY_GUARD",
-                cls.fast_recency_accuracy_guard,
+                fast_recency_accuracy_guard_default,
             ),
             min_reclaim_blocks=maybe_int(
                 "MIN_RECLAIM_BLOCKS",

@@ -252,7 +252,9 @@ class TriAttentionWorker(VLLMGPUWorker):
             "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
             "window_size=%s score_max_layers=%d score_layer_stride=%d "
             "prefill_min_reclaim_blocks_on_ascend=%d "
-            "prefill_max_compressions_on_ascend=%d build=%s",
+            "prefill_max_compressions_on_ascend=%d "
+            "fast_recency_only=%s fast_recency_accuracy_guard=%s "
+            "zero_copy_recency=%s build=%s",
             "eagerly" if installing_during_init else "lazily",
             config.kv_budget,
             config.divide_length,
@@ -265,6 +267,9 @@ class TriAttentionWorker(VLLMGPUWorker):
             int(getattr(config, "score_layer_stride", 1) or 1),
             int(getattr(config, "prefill_min_reclaim_blocks_on_ascend", 0) or 0),
             int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
+            bool(getattr(config, "fast_recency_only", False)),
+            bool(getattr(config, "fast_recency_accuracy_guard", True)),
+            bool(getattr(config, "enable_zero_copy_recency", True)),
             RUNTIME_BUILD_ID,
         )
 
