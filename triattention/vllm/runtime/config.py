@@ -56,6 +56,7 @@ class TriAttentionRuntimeConfig:
     log_all_worker_events: bool = False
     enable_async_compression_boundary: bool = False
     enable_zero_copy_recency: bool = True
+    zero_copy_recency_only_on_ascend: bool = True
     enable_packed_pos_delta_on_ascend: bool = False
     early_install_proxy_on_ascend: bool = True
     preinstall_input_patch: bool = True
@@ -211,6 +212,10 @@ class TriAttentionRuntimeConfig:
             enable_zero_copy_recency=maybe_bool(
                 "ENABLE_ZERO_COPY_RECENCY",
                 cls.enable_zero_copy_recency,
+            ),
+            zero_copy_recency_only_on_ascend=maybe_bool(
+                "ZERO_COPY_RECENCY_ONLY_ON_ASCEND",
+                cls.zero_copy_recency_only_on_ascend,
             ),
             enable_packed_pos_delta_on_ascend=maybe_bool(
                 "ENABLE_PACKED_POS_DELTA_ON_ASCEND",

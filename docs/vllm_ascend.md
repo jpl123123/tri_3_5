@@ -100,7 +100,7 @@ Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.wor
 Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
-Recent builds also include `build=ascend-fast-recency-force-v5-20260602` in the
+Recent builds also include `build=ascend-zero-copy-wait-v6-20260602` in the
 plugin, scheduler, and worker logs. If that build id is missing, the running
 container is still loading an older installed package or stale source path.
 
@@ -191,6 +191,11 @@ tail block remap by default instead of copying KV tensors; the expected
 compression reason is `kv_compacted:zero_copy_tail` or a compression log with
 `selector=enabled:recency_only reclaim=remap_tail`. To compare against the older
 copy path, set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
+
+On Ascend, `TRIATTN_RUNTIME_ZERO_COPY_RECENCY_ONLY_ON_ASCEND=1` is also enabled
+by default. If a prefill or decode step cannot safely remap the newest blocks
+yet, the runtime skips that compression attempt and waits for the next
+zero-copy opportunity instead of falling back to `reclaim=truncate_tail`.
 
 For correctness on long prompts, set
 `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` explicitly: when

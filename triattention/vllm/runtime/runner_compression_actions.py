@@ -213,6 +213,7 @@ def execute_runner_compression_actions(
                 "batch_queue_dedup",
                 "prefill_incomplete",
                 "prefill_compression_limit",
+                "zero_copy_recency_not_ready",
             }
             else logger.info
         )

@@ -253,10 +253,18 @@ class TriAttentionModelRunner:
         is_ascend = is_ascend_runtime(self._base_runner) or is_ascend_environment_available()
         for _raw_key, req_id, scheduled_tokens in scheduled_items:
             scheduled_tokens_i = max(1, int(scheduled_tokens))
-            is_prefill_step = scheduled_tokens_i > 1
             # If Scheduler already sent a trigger, check if we should
             # override it with a more accurate block-table-based estimate.
             existing = signals.get(req_id)
+            state = self._ensure_state_for_existing_request(req_id)
+            prefill_len = state.prefill_len
+            existing_estimate = int(
+                getattr(existing, "estimated_cache_len", 0) or 0
+            ) if existing is not None else 0
+            is_prefill_step = (
+                scheduled_tokens_i > 1
+                or (prefill_len > 0 and 0 < existing_estimate < prefill_len)
+            )
             if defer_chunked_prefill and is_prefill_step:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
@@ -273,8 +281,6 @@ class TriAttentionModelRunner:
                         scheduled_tokens_i,
                     )
                 continue
-            state = self._ensure_state_for_existing_request(req_id)
-            prefill_len = state.prefill_len
             max_prefill_compressions = int(
                 getattr(self.config, "prefill_max_compressions_on_ascend", 1)
                 or 0

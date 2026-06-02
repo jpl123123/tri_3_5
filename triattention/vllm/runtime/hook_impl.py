@@ -24,6 +24,7 @@ from .hook_preflight import resolve_hook_compaction_inputs, resolve_hook_request
 from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
 from .selector_hf import build_triattention_selector as _build_triattention_selector_impl
 from .signals import CompressionSignal
+from .thresholds import is_ascend_runtime
 
 # Selector implementation moved to triattention_runtime/selector_hf.py (D-017).
 
@@ -155,6 +156,17 @@ def make_runner_compression_hook(
                 budget_total=budget_total,
                 recent_unabsorbed_tokens=recent_unabsorbed_tokens,
             )
+        if (
+            bool(getattr(config, "fast_recency_only", False))
+            and bool(getattr(config, "enable_zero_copy_recency", True))
+            and bool(getattr(config, "zero_copy_recency_only_on_ascend", True))
+            and is_ascend_runtime(base_runner)
+        ):
+            return {
+                "applied": False,
+                "reason": "zero_copy_recency_not_ready",
+                "cache_len_after": effective_tokens,
+            }
 
         group_tensors = _get_group_tensors()
         pipeline_out = run_group_compaction_pipeline(

@@ -144,6 +144,11 @@ def build_hook_runtime_context(
         scheduler_output=scheduler_output,
         req_id=req_id,
     )
+    signal_scheduled_tokens = max(
+        1,
+        int(getattr(signal, "scheduled_tokens", 1) or 1),
+    )
+    scheduled_tokens = max(scheduled_tokens, signal_scheduled_tokens)
     num_computed_tokens = int(getattr(req_state, "num_computed_tokens", 0))
     estimated_effective_tokens = _resolve_estimated_effective_tokens(
         signal=signal,
@@ -184,10 +189,16 @@ def build_hook_runtime_context(
     is_prefill_step = (
         _is_request_scheduled_as_prefill(scheduler_output, req_id)
         or scheduled_tokens > 1
+        or (prefill_len > 0 and estimated_effective_tokens < prefill_len)
     )
     prefill_tokens_after_step = num_computed_tokens + (
         scheduled_tokens if _post_forward else 0
     )
+    if _post_forward:
+        prefill_tokens_after_step = max(
+            prefill_tokens_after_step,
+            estimated_effective_tokens,
+        )
     prefill_incomplete = (
         prefill_len > 0
         and is_prefill_step

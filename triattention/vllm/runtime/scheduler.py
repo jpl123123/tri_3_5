@@ -148,7 +148,8 @@ class TriAttentionScheduler(Scheduler):
             "prefill_min_reclaim_blocks_on_ascend=%d "
             "prefill_max_compressions_on_ascend=%d "
             "fast_recency_only=%s fast_recency_accuracy_guard=%s "
-            "zero_copy_recency=%s build=%s",
+            "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
+            "build=%s",
             self.triattention_config.kv_budget,
             self.triattention_config.divide_length,
             self.triattention_config.min_reclaim_blocks_on_ascend,
@@ -163,6 +164,7 @@ class TriAttentionScheduler(Scheduler):
             self.triattention_config.fast_recency_only,
             self.triattention_config.fast_recency_accuracy_guard,
             self.triattention_config.enable_zero_copy_recency,
+            self.triattention_config.zero_copy_recency_only_on_ascend,
             RUNTIME_BUILD_ID,
         )
 

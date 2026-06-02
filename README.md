@@ -255,6 +255,7 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_FAST_RECENCY_ONLY` | `false` | Diagnostic low-overhead selector that keeps the most recent budget tokens without sparse-stat scoring |
 | `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` | `true` | When stats are configured, prefer sparse TriAttention selection over pure recency for long-context correctness. If `FAST_RECENCY_ONLY=1` is explicitly set and this variable is not set, the runtime treats the explicit fast-recency request as authoritative. |
 | `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY` | `true` | On vLLM-Ascend, use block-table tail remap for `FAST_RECENCY_ONLY` when the budget is block-aligned |
+| `TRIATTN_RUNTIME_ZERO_COPY_RECENCY_ONLY_ON_ASCEND` | `true` | On Ascend fast-recency runs, wait for zero-copy tail remap instead of falling back to copy-based recency compaction |
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
 | `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND` | `true` | On vLLM-Ascend, wait until full prompt prefill finishes before first KV compaction |
