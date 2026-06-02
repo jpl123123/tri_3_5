@@ -28,6 +28,10 @@ ACTIVE_EXPECTED_QUERY_LENS_CPU: torch.Tensor | None = None
 ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
 ACTIVE_PACKED_POS_DELTAS_CPU: torch.Tensor | None = None
 ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
+ACTIVE_EFFECTIVE_MAX_SEQ_LEN: int | None = None
+ACTIVE_BLOCK_TABLE_TRIM_BLOCK_SIZE: int | None = None
+ACTIVE_BLOCK_TABLE_TRIM_ORIGINAL_COLS: int | None = None
+ACTIVE_BLOCK_TABLE_TRIM_EFFECTIVE_COLS: int | None = None
 ACTIVE_EFFECTIVE_OVERRIDES_ENABLED: bool = False
 ACTIVE_EFFECTIVE_OVERRIDES_CONSUMED: bool = False
 ACTIVE_EFFECTIVE_MAPPING_VALIDATED: bool = False
@@ -52,6 +56,25 @@ def set_active_effective_overrides_enabled(enabled: bool) -> None:
         ACTIVE_EFFECTIVE_MAPPING_VALIDATED = False
     else:
         ACTIVE_EFFECTIVE_MAPPING_VALIDATED = False
+
+
+def set_active_effective_max_seq_len(value: int | None) -> None:
+    global ACTIVE_EFFECTIVE_MAX_SEQ_LEN
+    ACTIVE_EFFECTIVE_MAX_SEQ_LEN = None if value is None else max(0, int(value))
+
+
+def set_active_block_table_trim_observation(
+    *,
+    block_size: int | None,
+    original_cols: int | None,
+    effective_cols: int | None,
+) -> None:
+    global ACTIVE_BLOCK_TABLE_TRIM_BLOCK_SIZE
+    global ACTIVE_BLOCK_TABLE_TRIM_ORIGINAL_COLS
+    global ACTIVE_BLOCK_TABLE_TRIM_EFFECTIVE_COLS
+    ACTIVE_BLOCK_TABLE_TRIM_BLOCK_SIZE = block_size
+    ACTIVE_BLOCK_TABLE_TRIM_ORIGINAL_COLS = original_cols
+    ACTIVE_BLOCK_TABLE_TRIM_EFFECTIVE_COLS = effective_cols
 
 
 def mark_active_effective_overrides_consumed() -> None:

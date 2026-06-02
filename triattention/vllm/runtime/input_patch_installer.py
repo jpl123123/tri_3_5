@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from vllm.logger import logger
 
+from . import input_patch_state as _patch_state
 from .input_patch_ascend_backend import (
     make_patched_ascend_v2_build_attn_metadata,
     make_patched_ascend_v2_compute_slot_mappings,
@@ -41,6 +42,7 @@ _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_PREPARE_ATTN: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V1_BLOCK_TABLE_GET_DEVICE_TENSOR: Callable[..., Any] | None = None
 
 
 def _debug_disable_v1_override_path() -> bool:
@@ -50,6 +52,19 @@ def _debug_disable_v1_override_path() -> bool:
         "yes",
         "on",
     }
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ascend_v1_block_table_trim_enabled() -> bool:
+    if _env_bool("TRIATTN_DEBUG_DISABLE_ASCEND_BLOCK_TABLE_TRIM", False):
+        return False
+    return _env_bool("TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE", True)
 
 
 def _is_triattention_patched(func: Any) -> bool:
@@ -127,6 +142,57 @@ def _shape0(value: Any) -> int | None:
         return int(value.shape[0])
     except Exception:
         return None
+
+
+def _shape1(value: Any) -> int | None:
+    try:
+        return int(value.shape[1])
+    except Exception:
+        return None
+
+
+def _ceil_div(numer: int, denom: int) -> int:
+    return (numer + denom - 1) // denom
+
+
+def make_patched_ascend_v1_block_table_get_device_tensor(
+    original_get_device_tensor: Callable[..., Any],
+) -> Callable[..., Any]:
+    def _patched_get_device_tensor(self):
+        tensor = original_get_device_tensor(self)
+        if (
+            not _ascend_v1_block_table_trim_enabled()
+            or not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED
+        ):
+            return tensor
+
+        max_seq_len = _patch_state.ACTIVE_EFFECTIVE_MAX_SEQ_LEN
+        block_size = _safe_int(getattr(self, "block_size", None))
+        original_cols = _shape1(tensor)
+        if (
+            max_seq_len is None
+            or block_size is None
+            or block_size <= 0
+            or original_cols is None
+        ):
+            return tensor
+
+        trim_cols = max(1, _ceil_div(int(max_seq_len), int(block_size)))
+        trim_cols = min(int(original_cols), int(trim_cols))
+        _patch_state.set_active_block_table_trim_observation(
+            block_size=int(block_size),
+            original_cols=int(original_cols),
+            effective_cols=int(trim_cols),
+        )
+        if trim_cols >= int(original_cols):
+            return tensor
+        view = tensor[:, :trim_cols]
+        if _env_bool("TRIATTN_RUNTIME_ASCEND_V1_BLOCK_TABLE_TRIM_CONTIGUOUS", False):
+            return view.contiguous()
+        return view
+
+    setattr(_patched_get_device_tensor, "_triattention_patched", True)
+    return _patched_get_device_tensor
 
 
 def _execute_model_details(
@@ -216,6 +282,12 @@ def _v1_attention_metadata_details(
         "max_query_len": _safe_int(max_query_len),
         "seq_lens_np_max": _array_max(
             seq_lens_np[: int(num_reqs)] if seq_lens_np is not None and num_reqs else seq_lens_np
+        ),
+        "effective_max_seq_len": _patch_state.ACTIVE_EFFECTIVE_MAX_SEQ_LEN,
+        "block_table_block_size": _patch_state.ACTIVE_BLOCK_TABLE_TRIM_BLOCK_SIZE,
+        "block_table_cols": _patch_state.ACTIVE_BLOCK_TABLE_TRIM_ORIGINAL_COLS,
+        "effective_block_table_cols": (
+            _patch_state.ACTIVE_BLOCK_TABLE_TRIM_EFFECTIVE_COLS
         ),
         "use_spec_decode": int(bool(kwargs.get("use_spec_decode", False))),
     }
@@ -416,6 +488,7 @@ def install_runtime_input_patch_hooks() -> bool:
     global _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA
     global _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA
     global _ORIGINAL_ASCEND_V2_PREPARE_ATTN
+    global _ORIGINAL_ASCEND_V1_BLOCK_TABLE_GET_DEVICE_TENSOR
     patched_any = False
     patched_targets: list[str] = []
 
@@ -585,6 +658,34 @@ def install_runtime_input_patch_hooks() -> bool:
                     )
                     patched_any = True
                     patched_targets.append("vllm_ascend.worker.model_runner_v1.NPUModelRunner")
+
+        try:
+            import vllm_ascend.worker.block_table as ascend_block_table_v1
+        except Exception:
+            ascend_block_table_v1 = None
+        if ascend_block_table_v1 is not None:
+            original_get_device_tensor = getattr(
+                ascend_block_table_v1.BlockTable,
+                "get_device_tensor",
+                None,
+            )
+            if (
+                original_get_device_tensor is not None
+                and _ORIGINAL_ASCEND_V1_BLOCK_TABLE_GET_DEVICE_TENSOR is None
+                and not _is_triattention_patched(original_get_device_tensor)
+            ):
+                _ORIGINAL_ASCEND_V1_BLOCK_TABLE_GET_DEVICE_TENSOR = (
+                    original_get_device_tensor
+                )
+                ascend_block_table_v1.BlockTable.get_device_tensor = (
+                    make_patched_ascend_v1_block_table_get_device_tensor(
+                        _ORIGINAL_ASCEND_V1_BLOCK_TABLE_GET_DEVICE_TENSOR
+                    )
+                )
+                patched_any = True
+                patched_targets.append(
+                    "vllm_ascend.worker.block_table.BlockTable.get_device_tensor"
+                )
 
     try:
         import vllm_ascend.worker.v2.model_runner as ascend_model_runner_v2

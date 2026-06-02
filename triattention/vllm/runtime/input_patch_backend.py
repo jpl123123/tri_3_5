@@ -13,9 +13,11 @@ from .input_patch_state import (
     active_effective_overrides_consumed,
     mark_active_effective_overrides_consumed,
     set_active_effective_num_computed_tokens,
+    set_active_effective_max_seq_len,
     set_active_effective_overrides_enabled,
     set_active_effective_positions,
     set_active_effective_sparse_overrides,
+    set_active_block_table_trim_observation,
 )
 
 
@@ -61,6 +63,12 @@ def clear_effective_overrides() -> None:
     )
     set_active_effective_positions(None)
     set_active_effective_num_computed_tokens(None)
+    set_active_effective_max_seq_len(None)
+    set_active_block_table_trim_observation(
+        block_size=None,
+        original_cols=None,
+        effective_cols=None,
+    )
 
 
 def mark_effective_overrides_consumed() -> None:

@@ -95,6 +95,30 @@ def _apply_sparse_seq_len_overrides_in_place(
     return applied
 
 
+def _record_active_effective_max_seq_len(
+    *,
+    seq_lens_np: np.ndarray,
+    num_reqs: int,
+) -> int | None:
+    if num_reqs <= 0:
+        _patch_state.set_active_effective_max_seq_len(None)
+        return None
+    try:
+        active = seq_lens_np[:num_reqs]
+        max_seq_len = int(active.max(initial=0))
+    except TypeError:
+        try:
+            max_seq_len = int(seq_lens_np[:num_reqs].max())
+        except Exception:
+            _patch_state.set_active_effective_max_seq_len(None)
+            return None
+    except Exception:
+        _patch_state.set_active_effective_max_seq_len(None)
+        return None
+    _patch_state.set_active_effective_max_seq_len(max_seq_len)
+    return max_seq_len
+
+
 def make_patched_v1_prepare_inputs(
     original_prepare_inputs: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -104,6 +128,7 @@ def make_patched_v1_prepare_inputs(
         overrides_enabled = bool(_patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED)
         seq_applied = False
         slot_applied = False
+        effective_max_seq_len = None
         total_num_scheduled_tokens = 0
         num_reqs = 0
         try:
@@ -139,6 +164,12 @@ def make_patched_v1_prepare_inputs(
             if seq_applied:
                 self.seq_lens.np[num_reqs:].fill(0)
                 self.seq_lens.copy_to_gpu()
+                effective_max_seq_len = _record_active_effective_max_seq_len(
+                    seq_lens_np=self.seq_lens.np,
+                    num_reqs=num_reqs,
+                )
+            else:
+                _patch_state.set_active_effective_max_seq_len(None)
 
             return out
         finally:
@@ -159,6 +190,7 @@ def make_patched_v1_prepare_inputs(
                         "overrides": int(overrides_enabled),
                         "seq_override": int(seq_applied),
                         "slot_override": int(slot_applied),
+                        "effective_max_seq_len": effective_max_seq_len,
                     },
                 )
 
