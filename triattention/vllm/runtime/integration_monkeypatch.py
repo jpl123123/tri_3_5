@@ -19,6 +19,7 @@ from .kv_allocation_sync import (
     prepare_request_effective_num_computed,
     resolve_request_effective_num_computed,
 )
+from .input_patch_backend import install_runtime_input_patch
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .scheduler import TriAttentionScheduler
@@ -614,6 +615,9 @@ def install_vllm_integration_monkeypatches(
                 TriAttentionWorker._ensure_triattention_runner_proxy
             )
         _install_optional_ascend_worker_patches()
+        cfg = TriAttentionRuntimeConfig.from_env()
+        if bool(getattr(cfg, "preinstall_input_patch", True)):
+            install_runtime_input_patch()
 
     # Relax the KV cache memory check: TriAttention compresses KV cache
     # during generation, so the physical blocks needed are less than what

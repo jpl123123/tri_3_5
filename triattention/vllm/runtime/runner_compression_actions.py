@@ -120,12 +120,20 @@ def execute_runner_compression_actions(
             budget_total = details.get("budget_total")
             reclaimed_block_count = details.get("reclaimed_block_count")
             recent_unabsorbed_tokens = details.get("recent_unabsorbed_tokens")
+            selector_status = details.get("selector_status")
+            block_reclaim = details.get("block_reclaim")
+            reclaim_mode = (
+                block_reclaim.get("mode")
+                if isinstance(block_reclaim, dict)
+                else None
+            )
             log_fn = logger.info if log_worker_events else logger.debug
             log_fn(
                 "TriAttention compression applied req=%s step=%d reason=%s "
-                "before=%s after=%d reclaimed_blocks=%s",
+                "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
                 req_id, signal.step, result.reason,
                 before_len, cache_len_after, reclaimed_block_count,
+                selector_status, reclaim_mode,
             )
             # Resolve scheduler_nct for this request so state can record
             # the num_computed_tokens at compression time (used by

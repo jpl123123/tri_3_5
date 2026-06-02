@@ -89,6 +89,7 @@ def register_triattention_backend():
         from triattention.vllm.runtime.integration_monkeypatch import (
             install_vllm_integration_monkeypatches,
         )
+        from triattention.vllm.runtime.version import runtime_build_info
 
         install_vllm_integration_monkeypatches(
             patch_scheduler=patch_scheduler,
@@ -97,8 +98,8 @@ def register_triattention_backend():
         if not quiet:
             logger.info(
                 "[TriAttention] Runtime (V2) plugin activated: "
-                "patch_scheduler=%s patch_worker=%s",
-                patch_scheduler, patch_worker,
+                "patch_scheduler=%s patch_worker=%s build=%s",
+                patch_scheduler, patch_worker, runtime_build_info(),
             )
     except Exception as exc:  # pragma: no cover - safety guard
         if not quiet:

@@ -24,6 +24,7 @@ from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .signals import CompressionSignal
 from .thresholds import compression_length_threshold, is_ascend_environment_available
+from .version import RUNTIME_BUILD_ID
 
 def _evict_reclaimed_block_metadata(block_pool: Any, block: Any) -> None:
     """Best-effort clear of prefix-cache metadata before reusing a block."""
@@ -141,13 +142,19 @@ class TriAttentionScheduler(Scheduler):
         logger.info(
             "TriAttentionScheduler initialized: budget=%d divide_length=%d "
             "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
-            "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s",
+            "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s "
+            "defer_prefill_on_ascend=%s score_max_layers=%d "
+            "score_max_layers_on_ascend=%d build=%s",
             self.triattention_config.kv_budget,
             self.triattention_config.divide_length,
             self.triattention_config.min_reclaim_blocks_on_ascend,
             self.triattention_config.protect_prefill,
             self.triattention_config.enable_kv_usage_trigger,
             self.triattention_config.enable_experimental_block_reclaim,
+            self.triattention_config.defer_prefill_compression_on_ascend,
+            self.triattention_config.score_max_layers,
+            self.triattention_config.score_max_layers_on_ascend,
+            RUNTIME_BUILD_ID,
         )
 
     def _resolve_prefill_len(self, req_id: str) -> int:

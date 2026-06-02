@@ -21,6 +21,7 @@ from .thresholds import (
     is_ascend_environment_available,
     is_ascend_runtime,
 )
+from .version import RUNTIME_BUILD_ID
 
 
 def _debug_early_install_proxy_enabled() -> bool:
@@ -231,7 +232,7 @@ class TriAttentionWorker(VLLMGPUWorker):
         logger.info(
             "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
             "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
-            "window_size=%s score_max_layers=%d score_layer_stride=%d",
+            "window_size=%s score_max_layers=%d score_layer_stride=%d build=%s",
             "eagerly" if installing_during_init else "lazily",
             config.kv_budget,
             config.divide_length,
@@ -242,6 +243,7 @@ class TriAttentionWorker(VLLMGPUWorker):
             config.window_size,
             int(getattr(config, "score_max_layers", 0) or 0),
             int(getattr(config, "score_layer_stride", 1) or 1),
+            RUNTIME_BUILD_ID,
         )
 
     def execute_model(self, scheduler_output):  # type: ignore[override]

@@ -100,6 +100,10 @@ Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.wor
 Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
+Recent builds also include `build=ascend-prefix-only-v3-20260602` in the
+plugin, scheduler, and worker logs. If that build id is missing, the running
+container is still loading an older installed package or stale source path.
+
 Compression events should report a status like `selector_status=enabled:torch:tp=1/2`
 when the first compression boundary is reached on NPU. The `tp=rank/size`
 suffix confirms that runtime scoring is using this worker's tensor-parallel
@@ -142,6 +146,17 @@ runtime log will include
 such as `2175 -> 2048` from running on NPU. With `--block-size 128`, the default
 `8` means compression waits until it can reclaim about 1024 KV tokens, which
 better amortizes scoring, KV movement, and scheduler/worker synchronization.
+
+For maximum TTFT improvement on very long prompts, validate prefill compression
+after confirming the build id above:
+
+```bash
+export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=0
+```
+
+This allows compression before later prefill chunks, so the remaining prompt
+prefill also benefits from the shorter KV. Keep it disabled if your target
+vLLM-Ascend build shows any quality regression.
 
 To isolate selector overhead from the NPU attention speedup, run one benchmark
 with the recency-only selector:
