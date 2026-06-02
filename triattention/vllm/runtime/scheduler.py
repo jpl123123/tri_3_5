@@ -204,7 +204,27 @@ class TriAttentionScheduler(Scheduler):
             is_prefill_step=is_prefill_step,
         )
 
+    def _ensure_runtime_fields(self) -> None:
+        """Lazily initialize fields when methods run on monkeypatched schedulers."""
+        if getattr(self, "triattention_config", None) is None:
+            self.triattention_config = TriAttentionRuntimeConfig.from_env()
+            if _is_ascend_scheduler_instance(self):
+                apply_ascend_fast_recency_defaults(self.triattention_config)
+        if getattr(self, "_planner", None) is None:
+            self._planner = CompressionPlanner(self.triattention_config)
+        if getattr(self, "_effective_len_tracker", None) is None:
+            self._effective_len_tracker = EffectiveCacheLenTracker()
+        if getattr(self, "_prefill_lens", None) is None:
+            self._prefill_lens = {}
+        if getattr(self, "_prefill_compression_counts", None) is None:
+            self._prefill_compression_counts = {}
+        if getattr(self, "_length_threshold_cache", None) is None:
+            self._length_threshold_cache = {}
+        if getattr(self, "_triattention_step", None) is None:
+            self._triattention_step = 0
+
     def _sync_prefill_lens(self, scheduler_output: SchedulerOutput) -> None:
+        self._ensure_runtime_fields()
         for new_req in scheduler_output.scheduled_new_reqs:
             req_id = new_req.req_id
             is_first_seen = req_id not in self._prefill_lens
@@ -244,6 +264,7 @@ class TriAttentionScheduler(Scheduler):
                 self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
 
     def _has_active_effective_len_overrides(self) -> bool:
+        self._ensure_runtime_fields()
         checker = getattr(self._effective_len_tracker, "has_any_effective_len_overrides", None)
         if callable(checker):
             try:
@@ -253,6 +274,7 @@ class TriAttentionScheduler(Scheduler):
         return False
 
     def _build_signals(self, scheduler_output: SchedulerOutput) -> dict[str, CompressionSignal]:
+        self._ensure_runtime_fields()
         kv_usage_enabled = bool(self.triattention_config.enable_kv_usage_trigger)
         kv_usage = self.kv_cache_manager.usage if kv_usage_enabled else None
         compression_disabled = bool(self.triattention_config.disable_compression)
@@ -389,6 +411,7 @@ class TriAttentionScheduler(Scheduler):
         return signals
 
     def _sync_effective_kv_offsets_before_schedule(self) -> None:
+        self._ensure_runtime_fields()
         running = getattr(self, "running", None)
         if not isinstance(running, list):
             return
@@ -461,6 +484,7 @@ class TriAttentionScheduler(Scheduler):
         return scheduler_output
 
     def _apply_compression_events(self, compression_events: list[dict[str, Any]]) -> None:
+        self._ensure_runtime_fields()
         coordinator = getattr(self.kv_cache_manager, "coordinator", None)
         managers = getattr(coordinator, "single_type_managers", None)
         block_size = int(getattr(self, "block_size", 1))

@@ -104,6 +104,7 @@ def _patched_scheduler_init(self, *args, **kwargs):
     self._planner = CompressionPlanner(cfg)
     self._effective_len_tracker = EffectiveCacheLenTracker()
     self._prefill_lens = {}
+    self._prefill_compression_counts = {}
     self._length_threshold_cache = {}
     self._triattention_step = 0
     logger.info(
@@ -591,6 +592,7 @@ def install_vllm_integration_monkeypatches(
         # Attach helper methods used by the patched wrappers.
         Scheduler._resolve_prefill_len = TriAttentionScheduler._resolve_prefill_len
         Scheduler._compute_length_threshold = TriAttentionScheduler._compute_length_threshold
+        Scheduler._ensure_runtime_fields = TriAttentionScheduler._ensure_runtime_fields
         Scheduler._sync_prefill_lens = TriAttentionScheduler._sync_prefill_lens
         Scheduler._has_active_effective_len_overrides = (
             TriAttentionScheduler._has_active_effective_len_overrides
