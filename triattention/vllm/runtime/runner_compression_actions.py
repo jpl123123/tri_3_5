@@ -206,7 +206,14 @@ def execute_runner_compression_actions(
         )
         skip_logger = (
             logger.debug
-            if result.reason in {"under_budget", "defer_recompress", "batch_queue_dedup"}
+            if result.reason
+            in {
+                "under_budget",
+                "defer_recompress",
+                "batch_queue_dedup",
+                "prefill_incomplete",
+                "prefill_compression_limit",
+            }
             else logger.info
         )
         skip_logger(

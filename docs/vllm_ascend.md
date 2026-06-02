@@ -100,7 +100,7 @@ Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.wor
 Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
-Recent builds also include `build=ascend-prefix-only-v3-20260602` in the
+Recent builds also include `build=ascend-prefill-throttle-v4-20260602` in the
 plugin, scheduler, and worker logs. If that build id is missing, the running
 container is still loading an older installed package or stale source path.
 
@@ -130,6 +130,8 @@ quality, try:
 ```bash
 export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
 export TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND=8
+export TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND=32
+export TRIATTN_RUNTIME_PREFILL_MAX_COMPRESSIONS_ON_ASCEND=1
 export TRIATTN_RUNTIME_SPARSE_NORMALIZE_SCORES=0
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
@@ -147,16 +149,27 @@ such as `2175 -> 2048` from running on NPU. With `--block-size 128`, the default
 `8` means compression waits until it can reclaim about 1024 KV tokens, which
 better amortizes scoring, KV movement, and scheduler/worker synchronization.
 
+`TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND` applies only to
+scheduled prefill chunks. The default `32` requires roughly 4096 reclaimable KV
+tokens with `--block-size 128`, so small prefill chunks such as
+`4096 -> 2048` are not repeatedly scored and compacted. The companion
+`TRIATTN_RUNTIME_PREFILL_MAX_COMPRESSIONS_ON_ASCEND=1` allows at most one
+prefill compaction per request; set it to `0` to disable prefill compaction
+while keeping decode-time compaction enabled.
+
 For maximum TTFT improvement on very long prompts, validate prefill compression
 after confirming the build id above:
 
 ```bash
 export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=0
+export TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND=32
+export TRIATTN_RUNTIME_PREFILL_MAX_COMPRESSIONS_ON_ASCEND=1
 ```
 
-This allows compression before later prefill chunks, so the remaining prompt
-prefill also benefits from the shorter KV. Keep it disabled if your target
-vLLM-Ascend build shows any quality regression.
+This allows one early compression before later prefill chunks, so the remaining
+prompt prefill can benefit from the shorter KV without repeatedly paying the
+sparse scoring cost. Keep it disabled if your target vLLM-Ascend build shows
+any quality regression.
 
 To isolate selector overhead from the NPU attention speedup, run one benchmark
 with the recency-only selector:

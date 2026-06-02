@@ -144,7 +144,9 @@ class TriAttentionScheduler(Scheduler):
             "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
             "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s "
             "defer_prefill_on_ascend=%s score_max_layers=%d "
-            "score_max_layers_on_ascend=%d build=%s",
+            "score_max_layers_on_ascend=%d "
+            "prefill_min_reclaim_blocks_on_ascend=%d "
+            "prefill_max_compressions_on_ascend=%d build=%s",
             self.triattention_config.kv_budget,
             self.triattention_config.divide_length,
             self.triattention_config.min_reclaim_blocks_on_ascend,
@@ -154,6 +156,8 @@ class TriAttentionScheduler(Scheduler):
             self.triattention_config.defer_prefill_compression_on_ascend,
             self.triattention_config.score_max_layers,
             self.triattention_config.score_max_layers_on_ascend,
+            self.triattention_config.prefill_min_reclaim_blocks_on_ascend,
+            self.triattention_config.prefill_max_compressions_on_ascend,
             RUNTIME_BUILD_ID,
         )
 
@@ -165,12 +169,18 @@ class TriAttentionScheduler(Scheduler):
             return 0
         return request.num_prompt_tokens
 
-    def _compute_length_threshold(self, prefill_len: int) -> int:
+    def _compute_length_threshold(
+        self,
+        prefill_len: int,
+        *,
+        is_prefill_step: bool = False,
+    ) -> int:
         return compression_length_threshold(
             self.triattention_config,
             prefill_len=prefill_len,
             block_size=int(getattr(self, "block_size", 1) or 1),
             is_ascend=_is_ascend_scheduler_instance(self),
+            is_prefill_step=is_prefill_step,
         )
 
     def _sync_prefill_lens(self, scheduler_output: SchedulerOutput) -> None:
@@ -250,6 +260,7 @@ class TriAttentionScheduler(Scheduler):
                 and scheduled_tokens_i > 1
             ):
                 continue
+            is_prefill_step = scheduled_tokens_i > 1
             has_override = self._effective_len_tracker.has_effective_len_override(req_id)
             if has_override:
                 effective_base_len = self._effective_len_tracker.observe_num_computed(
@@ -266,14 +277,24 @@ class TriAttentionScheduler(Scheduler):
                 if compression_disabled and not kv_usage_enabled:
                     continue
                 if not kv_usage_enabled and not compression_disabled:
-                    threshold = self._length_threshold_cache.get(req_id)
+                    if is_prefill_step:
+                        threshold = self._compute_length_threshold(
+                            prefill_len,
+                            is_prefill_step=True,
+                        )
+                    else:
+                        threshold = self._length_threshold_cache.get(req_id)
                     if threshold is None:
-                        threshold = self._compute_length_threshold(prefill_len)
+                        threshold = self._compute_length_threshold(
+                            prefill_len,
+                            is_prefill_step=is_prefill_step,
+                        )
                         self._length_threshold_cache[req_id] = threshold
                         logger.info(
                             "TriAttention threshold computed req=%s threshold=%d "
-                            "prefill_len=%d budget=%d divide_length=%d",
+                            "prefill_len=%d is_prefill_step=%s budget=%d divide_length=%d",
                             req_id, threshold, prefill_len,
+                            is_prefill_step,
                             self.triattention_config.kv_budget,
                             self.triattention_config.divide_length,
                         )
@@ -287,7 +308,10 @@ class TriAttentionScheduler(Scheduler):
                 step=self._triattention_step,
                 kv_usage=kv_usage,
                 scheduled_tokens=scheduled_tokens_i,
-                length_threshold=self._compute_length_threshold(prefill_len),
+                length_threshold=self._compute_length_threshold(
+                    prefill_len,
+                    is_prefill_step=is_prefill_step,
+                ),
             )
             # Keep scheduler->runner side-channel sparse to reduce per-step IPC
             # metadata overhead in the common no-compression decode path.

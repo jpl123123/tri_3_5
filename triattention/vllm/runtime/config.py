@@ -51,6 +51,8 @@ class TriAttentionRuntimeConfig:
     fast_recency_accuracy_guard: bool = True
     min_reclaim_blocks: int = 1
     min_reclaim_blocks_on_ascend: int = 8
+    prefill_min_reclaim_blocks_on_ascend: int = 32
+    prefill_max_compressions_on_ascend: int = 1
     log_all_worker_events: bool = False
     enable_async_compression_boundary: bool = False
     enable_zero_copy_recency: bool = True
@@ -184,6 +186,14 @@ class TriAttentionRuntimeConfig:
             min_reclaim_blocks_on_ascend=maybe_int(
                 "MIN_RECLAIM_BLOCKS_ON_ASCEND",
                 cls.min_reclaim_blocks_on_ascend,
+            ),
+            prefill_min_reclaim_blocks_on_ascend=maybe_int(
+                "PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND",
+                cls.prefill_min_reclaim_blocks_on_ascend,
+            ),
+            prefill_max_compressions_on_ascend=maybe_int(
+                "PREFILL_MAX_COMPRESSIONS_ON_ASCEND",
+                cls.prefill_max_compressions_on_ascend,
             ),
             log_all_worker_events=maybe_bool(
                 "LOG_ALL_WORKER_EVENTS",
@@ -363,6 +373,16 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "min_reclaim_blocks_on_ascend must be >= 0, "
                 f"got {self.min_reclaim_blocks_on_ascend}"
+            )
+        if self.prefill_min_reclaim_blocks_on_ascend < 0:
+            raise ValueError(
+                "prefill_min_reclaim_blocks_on_ascend must be >= 0, "
+                f"got {self.prefill_min_reclaim_blocks_on_ascend}"
+            )
+        if self.prefill_max_compressions_on_ascend < 0:
+            raise ValueError(
+                "prefill_max_compressions_on_ascend must be >= 0, "
+                f"got {self.prefill_max_compressions_on_ascend}"
             )
         if self.score_chunk_max_tokens < 1:
             raise ValueError(

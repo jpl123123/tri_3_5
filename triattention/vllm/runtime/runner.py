@@ -166,7 +166,12 @@ class TriAttentionModelRunner:
             return None
         return int(num_blocks_per_row[req_index]) * blk_size
 
-    def _compression_threshold(self, prefill_len: int) -> int:
+    def _compression_threshold(
+        self,
+        prefill_len: int,
+        *,
+        is_prefill_step: bool = False,
+    ) -> int:
         cache_config = getattr(self._base_runner, "cache_config", None)
         block_size = int(getattr(cache_config, "block_size", 1) or 1)
         return compression_length_threshold(
@@ -174,6 +179,7 @@ class TriAttentionModelRunner:
             prefill_len=prefill_len,
             block_size=block_size,
             is_ascend=is_ascend_runtime(self._base_runner),
+            is_prefill_step=is_prefill_step,
         )
 
     def _should_defer_chunked_prefill_compression(self) -> bool:
@@ -244,12 +250,14 @@ class TriAttentionModelRunner:
             return signals
         scheduled_items = get_scheduled_token_items(scheduler_output)
         defer_chunked_prefill = self._should_defer_chunked_prefill_compression()
+        is_ascend = is_ascend_runtime(self._base_runner) or is_ascend_environment_available()
         for _raw_key, req_id, scheduled_tokens in scheduled_items:
             scheduled_tokens_i = max(1, int(scheduled_tokens))
+            is_prefill_step = scheduled_tokens_i > 1
             # If Scheduler already sent a trigger, check if we should
             # override it with a more accurate block-table-based estimate.
             existing = signals.get(req_id)
-            if defer_chunked_prefill and scheduled_tokens_i > 1:
+            if defer_chunked_prefill and is_prefill_step:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
                     if hasattr(self.state_store, "mark_compression_skipped"):
@@ -267,6 +275,33 @@ class TriAttentionModelRunner:
                 continue
             state = self._ensure_state_for_existing_request(req_id)
             prefill_len = state.prefill_len
+            max_prefill_compressions = int(
+                getattr(self.config, "prefill_max_compressions_on_ascend", 1)
+                or 0
+            )
+            if (
+                is_prefill_step
+                and is_ascend
+                and int(getattr(state, "compression_count", 0) or 0)
+                >= max_prefill_compressions
+            ):
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                    if hasattr(self.state_store, "mark_compression_skipped"):
+                        self.state_store.mark_compression_skipped(
+                            req_id=req_id,
+                            reason="prefill_compression_limit",
+                            step=self._last_step,
+                        )
+                    self._logger.debug(
+                        "TriAttention dropped prefill trigger after limit: "
+                        "req=%s scheduled=%d compression_count=%d limit=%d",
+                        req_id,
+                        scheduled_tokens_i,
+                        int(getattr(state, "compression_count", 0) or 0),
+                        max_prefill_compressions,
+                    )
+                continue
             # Compute actual KV length on the Worker side.
             # kv_from_blocks: block table already includes current step's
             # allocated blocks (update_states runs before execute_model),
@@ -293,7 +328,10 @@ class TriAttentionModelRunner:
                         actual_kv = int(getattr(req_state, "num_computed_tokens", 0))
                     else:
                         continue
-            threshold = self._compression_threshold(prefill_len)
+            threshold = self._compression_threshold(
+                prefill_len,
+                is_prefill_step=is_prefill_step,
+            )
             if kv_from_blocks:
                 # Block table capacity already covers scheduled tokens.
                 effective_kv = actual_kv
@@ -322,7 +360,8 @@ class TriAttentionModelRunner:
                 and int(getattr(existing, "scheduled_tokens", 1)) <= 1
             ):
                 continue
-            self._logger.info(
+            log_fn = self._logger.info if self.config.log_decisions else self._logger.debug
+            log_fn(
                 "TriAttention worker self-trigger: req=%s actual_kv=%d "
                 "effective_kv=%d scheduled=%d threshold=%d "
                 "from_blocks=%s scheduler_had_signal=%s",

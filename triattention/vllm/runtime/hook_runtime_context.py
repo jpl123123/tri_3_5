@@ -205,6 +205,19 @@ def build_hook_runtime_context(
             )
         )
     )
+    is_ascend = _is_ascend_runner(base_runner)
+    prefill_compression_count = (
+        int(getattr(req_runtime_state, "compression_count", 0) or 0)
+        if req_runtime_state is not None
+        else 0
+    )
+    prefill_limit_hit = (
+        config.enable_experimental_kv_compaction
+        and is_prefill_step
+        and is_ascend
+        and prefill_compression_count
+        >= int(getattr(config, "prefill_max_compressions_on_ascend", 1) or 0)
+    )
 
     if (
         config.fail_on_effective_len_regression
@@ -230,17 +243,22 @@ def build_hook_runtime_context(
     local_length_threshold = budget_total + compression_reclaim_interval_tokens(
         config,
         block_size=block_size_hint,
-        is_ascend=_is_ascend_runner(base_runner),
+        is_ascend=is_ascend,
+        is_prefill_step=is_prefill_step,
     )
     length_gate_hit = estimated_effective_tokens >= local_length_threshold
     kv_override = str(getattr(signal, "reason", "")) == "kv_usage_threshold"
-    should_defer_recompress = defer_for_prefill or (
+    should_defer_recompress = defer_for_prefill or prefill_limit_hit or (
         config.enable_experimental_kv_compaction
         and req_id in compressed_once
         and not kv_override
         and not length_gate_hit
     )
-    defer_reason = "prefill_incomplete" if defer_for_prefill else None
+    defer_reason = None
+    if defer_for_prefill:
+        defer_reason = "prefill_incomplete"
+    elif prefill_limit_hit:
+        defer_reason = "prefill_compression_limit"
     return HookRuntimeContext(
         scheduled_tokens=int(scheduled_tokens),
         num_computed_tokens=int(num_computed_tokens),

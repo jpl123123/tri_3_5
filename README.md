@@ -262,6 +262,8 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` | `0` | Ascend-only layer cap used when `SCORE_MAX_LAYERS=0`; try `8` or `4` after validating output quality |
 | `TRIATTN_RUNTIME_SCORE_LAYER_STRIDE` | `1` | Score one layer every N layers before optional max-layer sampling |
 | `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` | `8` | On Ascend, wait until at least this many KV blocks can be reclaimed before triggering compression |
+| `TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND` | `32` | On Ascend prefill steps, require a larger reclaim window before compression to amortize sparse scoring |
+| `TRIATTN_RUNTIME_PREFILL_MAX_COMPRESSIONS_ON_ASCEND` | `1` | Maximum number of compression actions allowed during Ascend prefill for one request (`0` disables prefill compression) |
 | `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY` | `false` | Force an async batch-queue boundary around compression; normally keep disabled on Ascend for better TPOT |
 | `TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND` | `false` | Experimental Ascend slot-mapping micro-optimization; keep disabled unless target output quality is validated |
 | `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND` | `true` | Install the TriAttention runner proxy during Ascend worker init so patching happens before measured requests |

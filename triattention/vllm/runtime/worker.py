@@ -128,12 +128,14 @@ def _compression_threshold_for_signal(
     *,
     block_size: int,
     is_ascend: bool,
+    is_prefill_step: bool = False,
 ) -> int:
     return compression_length_threshold(
         config,
         prefill_len=max(0, int(getattr(signal, "prefill_len", 0) or 0)),
         block_size=block_size,
         is_ascend=is_ascend,
+        is_prefill_step=is_prefill_step,
     )
 
 
@@ -172,6 +174,17 @@ def should_install_triattention_runner_proxy(
         scheduled_tokens = max(1, int(getattr(signal, "scheduled_tokens", 1) or 1))
         if defer_chunked_prefill and scheduled_tokens > 1:
             continue
+        if (
+            scheduled_tokens > 1
+            and (
+                is_ascend_runtime(worker)
+                or is_ascend_runtime(model_runner)
+                or is_ascend_environment_available()
+            )
+            and int(getattr(config, "prefill_max_compressions_on_ascend", 1) or 0)
+            == 0
+        ):
+            continue
         actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
         if actual_kv is None or block_size is None:
             saw_trigger_without_worker_length = True
@@ -180,7 +193,12 @@ def should_install_triattention_runner_proxy(
             config,
             signal,
             block_size=block_size,
-            is_ascend=is_ascend_runtime(worker) or is_ascend_runtime(model_runner),
+            is_ascend=(
+                is_ascend_runtime(worker)
+                or is_ascend_runtime(model_runner)
+                or is_ascend_environment_available()
+            ),
+            is_prefill_step=scheduled_tokens > 1,
         ):
             return True
     return saw_trigger_without_worker_length
@@ -232,7 +250,9 @@ class TriAttentionWorker(VLLMGPUWorker):
         logger.info(
             "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
             "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
-            "window_size=%s score_max_layers=%d score_layer_stride=%d build=%s",
+            "window_size=%s score_max_layers=%d score_layer_stride=%d "
+            "prefill_min_reclaim_blocks_on_ascend=%d "
+            "prefill_max_compressions_on_ascend=%d build=%s",
             "eagerly" if installing_during_init else "lazily",
             config.kv_budget,
             config.divide_length,
@@ -243,6 +263,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             config.window_size,
             int(getattr(config, "score_max_layers", 0) or 0),
             int(getattr(config, "score_layer_stride", 1) or 1),
+            int(getattr(config, "prefill_min_reclaim_blocks_on_ascend", 0) or 0),
+            int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
             RUNTIME_BUILD_ID,
         )
 
