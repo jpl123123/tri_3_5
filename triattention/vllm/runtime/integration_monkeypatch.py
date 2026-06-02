@@ -42,6 +42,7 @@ _ORIG_ASCEND_WORKER_METHODS: dict[type, dict[str, Callable[..., Any]]] = {}
 _ORIG_KVCACHE_ALLOCATE_SLOTS: Callable[..., Any] | None = None
 _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE: Callable[..., Any] | None = None
 _DEFER_PREFILL_BOUNDARY_CACHE: bool | None = None
+_ASYNC_BOUNDARY_ENABLED_CACHE: bool | None = None
 
 
 def _maybe_rewrite_v2_output_req_map(scheduler_output: Any, model_runner_output: Any) -> None:
@@ -394,6 +395,8 @@ def _patched_kv_cache_allocate_slots(
 
 
 def _scheduler_output_has_compression_boundary(scheduler_output: Any) -> bool:
+    if not _async_compression_boundary_enabled():
+        return False
     signals = getattr(scheduler_output, "triattention_signals", None)
     if not isinstance(signals, dict) or not signals:
         return False
@@ -405,6 +408,17 @@ def _scheduler_output_has_compression_boundary(scheduler_output: Any) -> bool:
             continue
         return True
     return False
+
+
+def _async_compression_boundary_enabled() -> bool:
+    global _ASYNC_BOUNDARY_ENABLED_CACHE
+    if _ASYNC_BOUNDARY_ENABLED_CACHE is not None:
+        return _ASYNC_BOUNDARY_ENABLED_CACHE
+    cfg = TriAttentionRuntimeConfig.from_env()
+    _ASYNC_BOUNDARY_ENABLED_CACHE = bool(
+        getattr(cfg, "enable_async_compression_boundary", False)
+    )
+    return _ASYNC_BOUNDARY_ENABLED_CACHE
 
 
 def _should_defer_prefill_boundary() -> bool:
@@ -462,7 +476,7 @@ def _patched_engine_core_step_with_batch_queue(self):
         boundary_current = _scheduler_output_has_compression_boundary(scheduler_output)
         if boundary_current:
             setattr(scheduler_output, "_triattention_force_boundary_sync", True)
-            logger.info(
+            logger.debug(
                 "TriAttention async boundary: delaying queue lookahead for compression batch"
             )
         exec_future = self.model_executor.execute_model(

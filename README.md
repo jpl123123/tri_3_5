@@ -253,12 +253,14 @@ print(outputs[0].outputs[0].text)
 | `TRIATTN_RUNTIME_PRUNING_MODE` | `per_head` | Token selection strategy (`per_head` or `per_layer_per_head`) |
 | `TRIATTN_RUNTIME_SCORING_BACKEND` | `auto` | Scoring backend (`auto`, `triton`, `torch`/`pytorch`); `auto` uses PyTorch/torch_npu on vLLM-Ascend |
 | `TRIATTN_RUNTIME_FAST_RECENCY_ONLY` | `false` | Diagnostic low-overhead selector that keeps the most recent budget tokens without sparse-stat scoring |
+| `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY` | `true` | On vLLM-Ascend, use block-table tail remap for `FAST_RECENCY_ONLY` when the budget is block-aligned |
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
 | `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND` | `true` | On vLLM-Ascend, wait until full prompt prefill finishes before first KV compaction |
 | `TRIATTN_RUNTIME_SCORE_MAX_LAYERS` | `0` | Maximum number of layers to score before cross-layer aggregation (`0` means all layers; try `8` or `4` on Ascend for lower compression overhead) |
 | `TRIATTN_RUNTIME_SCORE_LAYER_STRIDE` | `1` | Score one layer every N layers before optional max-layer sampling |
 | `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` | `8` | On Ascend, wait until at least this many KV blocks can be reclaimed before triggering compression |
+| `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY` | `false` | Force an async batch-queue boundary around compression; normally keep disabled on Ascend for better TPOT |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_KV_COMPACTION` | `true` | Enable in-place KV cache compaction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_BLOCK_RECLAIM` | `true` | Enable freed block reclamation |
 | `ENABLE_TRIATTENTION` | `true` | Master switch to enable/disable the plugin |

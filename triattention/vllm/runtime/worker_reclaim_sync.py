@@ -11,6 +11,59 @@ from vllm.logger import logger
 _DEBUG_DISABLE_LOGGED = False
 
 
+def _event_reclaim_groups(event: dict[str, Any]) -> tuple[str, dict[int, dict[str, Any]]]:
+    block_reclaim = event.get("block_reclaim")
+    if not isinstance(block_reclaim, dict):
+        return "truncate_tail", {}
+    mode = block_reclaim.get("mode")
+    if mode not in {"truncate_tail", "remap_tail"}:
+        mode = "truncate_tail"
+    groups = block_reclaim.get("groups")
+    if not isinstance(groups, list):
+        return str(mode), {}
+    by_gid: dict[int, dict[str, Any]] = {}
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        gid = group.get("gid")
+        if isinstance(gid, int):
+            by_gid[gid] = group
+    return str(mode), by_gid
+
+
+def _block_ids_after(group: dict[str, Any] | None) -> list[int] | None:
+    if not isinstance(group, dict):
+        return None
+    block_ids_after = group.get("block_ids_after")
+    if not isinstance(block_ids_after, list):
+        return None
+    if not all(isinstance(block_id, int) for block_id in block_ids_after):
+        return None
+    if len(set(block_ids_after)) != len(block_ids_after):
+        return None
+    return list(block_ids_after)
+
+
+def _rewrite_table_row(table: Any, req_index: int, block_ids: list[int]) -> bool:
+    add_row = getattr(table, "add_row", None)
+    if callable(add_row):
+        add_row(block_ids, req_index)
+        return True
+
+    num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
+    block_table = getattr(table, "block_table", None)
+    block_table_np = getattr(block_table, "np", None)
+    if not isinstance(num_blocks_per_row, np.ndarray):
+        return False
+    if not isinstance(block_table_np, np.ndarray):
+        return False
+    if len(block_ids) > block_table_np.shape[1]:
+        return False
+    block_table_np[req_index, :len(block_ids)] = block_ids
+    num_blocks_per_row[req_index] = len(block_ids)
+    return True
+
+
 def apply_worker_block_reclaim_events(
     *,
     base_runner: Any,
@@ -98,14 +151,31 @@ def apply_worker_block_reclaim_events(
             continue
 
         required_blocks = (cache_len_after + block_size - 1) // block_size
+        reclaim_mode, groups_by_gid = _event_reclaim_groups(event)
 
-        for table in tables:
+        for gid, table in enumerate(tables):
             num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
             if num_blocks_per_row is None:
                 continue
             if not isinstance(num_blocks_per_row, np.ndarray):
                 continue
             current = int(num_blocks_per_row[req_index])
+            if reclaim_mode == "remap_tail":
+                block_ids_after = _block_ids_after(groups_by_gid.get(gid))
+                if block_ids_after is not None:
+                    if _rewrite_table_row(table, req_index, block_ids_after):
+                        logger.debug(
+                            "TriAttention worker remap: req=%s gid=%d "
+                            "num_blocks %d -> %d",
+                            req_id, gid, current, len(block_ids_after),
+                        )
+                    else:
+                        logger.warning(
+                            "TriAttention worker remap failed: req=%s gid=%d "
+                            "table=%s",
+                            req_id, gid, type(table).__name__,
+                        )
+                    continue
             if current > required_blocks:
                 num_blocks_per_row[req_index] = required_blocks
                 logger.debug(
@@ -122,6 +192,28 @@ def apply_worker_block_reclaim_events(
             if req_state is not None:
                 block_ids_attr = getattr(req_state, "block_ids", None)
                 if isinstance(block_ids_attr, (list, tuple)):
-                    for group_blocks in block_ids_attr:
-                        if isinstance(group_blocks, list) and len(group_blocks) > required_blocks:
-                            del group_blocks[required_blocks:]
+                    if reclaim_mode == "remap_tail":
+                        rewritten_groups: list[Any] = []
+                        changed = False
+                        for gid, group_blocks in enumerate(block_ids_attr):
+                            block_ids_after = _block_ids_after(groups_by_gid.get(gid))
+                            if block_ids_after is None:
+                                rewritten_groups.append(group_blocks)
+                                continue
+                            if isinstance(group_blocks, tuple):
+                                rewritten_groups.append(tuple(block_ids_after))
+                            else:
+                                rewritten_groups.append(list(block_ids_after))
+                            changed = True
+                        if changed:
+                            if isinstance(block_ids_attr, tuple):
+                                setattr(req_state, "block_ids", tuple(rewritten_groups))
+                            else:
+                                setattr(req_state, "block_ids", rewritten_groups)
+                    else:
+                        for group_blocks in block_ids_attr:
+                            if (
+                                isinstance(group_blocks, list)
+                                and len(group_blocks) > required_blocks
+                            ):
+                                del group_blocks[required_blocks:]

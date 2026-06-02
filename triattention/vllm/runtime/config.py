@@ -50,6 +50,8 @@ class TriAttentionRuntimeConfig:
     min_reclaim_blocks: int = 1
     min_reclaim_blocks_on_ascend: int = 8
     log_all_worker_events: bool = False
+    enable_async_compression_boundary: bool = False
+    enable_zero_copy_recency: bool = True
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -173,6 +175,14 @@ class TriAttentionRuntimeConfig:
             log_all_worker_events=maybe_bool(
                 "LOG_ALL_WORKER_EVENTS",
                 cls.log_all_worker_events,
+            ),
+            enable_async_compression_boundary=maybe_bool(
+                "ENABLE_ASYNC_COMPRESSION_BOUNDARY",
+                cls.enable_async_compression_boundary,
+            ),
+            enable_zero_copy_recency=maybe_bool(
+                "ENABLE_ZERO_COPY_RECENCY",
+                cls.enable_zero_copy_recency,
             ),
             sparse_stats_path=Path(sparse_stats_path_raw) if sparse_stats_path_raw else None,
             model_path=Path(model_path_raw) if model_path_raw else None,

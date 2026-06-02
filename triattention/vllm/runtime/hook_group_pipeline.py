@@ -9,7 +9,7 @@ import torch
 
 from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
-from .layout_engine import execute_group_compaction
+from .layout_engine import execute_group_compaction, num_required_blocks
 from .plan_models import PlacementPlan, ReclaimEvent, ReclaimGroup
 from .selection_planner import prepare_group_layer_compactions
 from .signals import CompressionSignal
@@ -21,6 +21,7 @@ class GroupPipelineOutcome:
     selection_mode: str
     block_reclaim_groups: list[ReclaimGroup]
     mutable_block_ids_by_group: list[list[int] | None]
+    reclaim_mode: str = "truncate_tail"
 
 
 def normalize_mutable_block_ids_by_group(
@@ -37,6 +38,100 @@ def normalize_mutable_block_ids_by_group(
             continue
         mutable_block_ids_by_group.append([int(block_id) for block_id in group_block_ids])
     return mutable_block_ids_by_group
+
+
+def try_build_recency_tail_block_remap(
+    *,
+    config: TriAttentionRuntimeConfig,
+    mutable_block_ids_by_group: list[list[int] | None],
+    effective_tokens: int,
+    budget_total: int,
+    block_size: int,
+) -> GroupPipelineOutcome | None:
+    """Zero-copy fast path for recency-only, block-aligned tail retention.
+
+    FAST_RECENCY_ONLY keeps the newest tokens. When the budget is an integral
+    number of KV blocks, we can remap the request's block table to the newest
+    physical blocks instead of copying KV tensors into the old prefix blocks.
+    The effective length may be up to one block smaller than the nominal budget
+    when the tail starts in the middle of a block, which is the price of keeping
+    this path copy-free.
+    """
+    if not bool(getattr(config, "fast_recency_only", False)):
+        return None
+    if not bool(getattr(config, "enable_zero_copy_recency", True)):
+        return None
+    if not bool(getattr(config, "enable_experimental_block_reclaim", False)):
+        return None
+    if bool(getattr(config, "protect_prefill", False)):
+        return None
+    if block_size <= 0 or budget_total <= 0:
+        return None
+    if budget_total % block_size != 0:
+        return None
+
+    budget_blocks = budget_total // block_size
+    if budget_blocks <= 0:
+        return None
+
+    remapped_block_ids_by_group: list[list[int] | None] = []
+    reclaim_groups: list[ReclaimGroup] = []
+    cache_len_after: int | None = None
+    remapped_any = False
+
+    for gid, normalized_block_ids in enumerate(mutable_block_ids_by_group):
+        if not normalized_block_ids:
+            remapped_block_ids_by_group.append(normalized_block_ids)
+            continue
+        group_capacity_tokens = len(normalized_block_ids) * block_size
+        group_total_tokens = min(int(effective_tokens), group_capacity_tokens)
+        if group_total_tokens <= int(budget_total):
+            return None
+        before_required = num_required_blocks(group_total_tokens, block_size)
+        if before_required <= budget_blocks:
+            return None
+        # Avoid remapping when this step has already allocated extra blocks
+        # beyond the KV tokens being compressed. The generic copy path has
+        # additional logic to preserve such just-appended blocks safely.
+        if len(normalized_block_ids) != before_required:
+            return None
+        start_block = before_required - budget_blocks
+        kept_block_ids = list(normalized_block_ids[start_block:before_required])
+        if len(kept_block_ids) != budget_blocks:
+            return None
+        removed_block_ids = (
+            list(normalized_block_ids[:start_block])
+            + list(normalized_block_ids[before_required:])
+        )
+        group_cache_len_after = group_total_tokens - start_block * block_size
+        if group_cache_len_after <= 0 or group_cache_len_after > budget_total:
+            return None
+        if cache_len_after is None:
+            cache_len_after = int(group_cache_len_after)
+        elif cache_len_after != int(group_cache_len_after):
+            return None
+        remapped_block_ids_by_group.append(kept_block_ids)
+        if removed_block_ids:
+            reclaim_groups.append(
+                ReclaimGroup(
+                    gid=gid,
+                    block_ids_before=list(normalized_block_ids),
+                    block_ids_after=kept_block_ids,
+                    block_ids_removed=removed_block_ids,
+                )
+            )
+        remapped_any = True
+
+    if not remapped_any or cache_len_after is None or not reclaim_groups:
+        return None
+
+    return GroupPipelineOutcome(
+        cache_len_after=int(cache_len_after),
+        selection_mode="zero_copy_tail",
+        block_reclaim_groups=reclaim_groups,
+        mutable_block_ids_by_group=remapped_block_ids_by_group,
+        reclaim_mode="remap_tail",
+    )
 
 
 def run_group_compaction_pipeline(
@@ -180,7 +275,7 @@ def finalize_hook_placement_result(
             else reassigned_block_ids
         )
         block_reclaim_payload = ReclaimEvent(
-            mode="truncate_tail",
+            mode=outcome.reclaim_mode,
             groups=outcome.block_reclaim_groups,
         )
 

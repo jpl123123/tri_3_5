@@ -42,6 +42,7 @@ export TRIATTN_RUNTIME_KV_BUDGET=2048
 export TRIATTN_RUNTIME_DIVIDE_LENGTH=128
 export TRIATTN_RUNTIME_WINDOW_SIZE=128
 export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=1
+export TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=0
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -141,11 +142,15 @@ with the recency-only selector:
 export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
 ```
 
-This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. The
-expected compression status is `selector_status=enabled:recency_only`. If this
-mode still does not improve TPOT, the bottleneck is likely outside TriAttention
-scoring, for example ACL graph replay or an attention kernel path that is not
-benefiting from shorter effective `seq_lens`.
+This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. When
+`KV_BUDGET` is a multiple of `--block-size`, vLLM-Ascend uses a zero-copy tail
+block remap by default instead of copying KV tensors; the expected compression
+reason is `kv_compacted:zero_copy_tail`. To compare against the older copy path,
+set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
+
+The async compression boundary is disabled by default because it can repeatedly
+block vLLM's batch-queue lookahead during generation. Re-enable it only for
+debugging with `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=1`.
 
 ## Calibration Stats
 

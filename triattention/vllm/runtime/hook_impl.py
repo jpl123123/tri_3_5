@@ -18,6 +18,7 @@ from .hook_runtime_context import build_hook_runtime_context
 from .hook_group_pipeline import (
     finalize_hook_placement_result,
     run_group_compaction_pipeline,
+    try_build_recency_tail_block_remap,
 )
 from .hook_preflight import resolve_hook_compaction_inputs, resolve_hook_request_context
 from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
@@ -134,6 +135,26 @@ def make_runner_compression_hook(
             return compaction_inputs
         block_size = compaction_inputs.block_size
         mutable_block_ids_by_group = compaction_inputs.mutable_block_ids_by_group
+
+        zero_copy_outcome = try_build_recency_tail_block_remap(
+            config=config,
+            mutable_block_ids_by_group=mutable_block_ids_by_group,
+            effective_tokens=effective_tokens,
+            budget_total=budget_total,
+            block_size=block_size,
+        )
+        if zero_copy_outcome is not None:
+            compressed_once.add(req_id)
+            return finalize_hook_placement_result(
+                req_state=req_state,
+                original_block_ids_by_group=original_block_ids_by_group,
+                config=config,
+                selector_status=str(selector_status),
+                outcome=zero_copy_outcome,
+                effective_tokens=effective_tokens,
+                budget_total=budget_total,
+                recent_unabsorbed_tokens=recent_unabsorbed_tokens,
+            )
 
         group_tensors = _get_group_tensors()
         pipeline_out = run_group_compaction_pipeline(

@@ -434,6 +434,13 @@ class TriAttentionScheduler(Scheduler):
                         req_groups_seen += 1
 
             block_reclaim = event.get("block_reclaim")
+            reclaim_mode = (
+                block_reclaim.get("mode")
+                if isinstance(block_reclaim, dict)
+                else "truncate_tail"
+            )
+            if reclaim_mode not in {"truncate_tail", "remap_tail"}:
+                reclaim_mode = "truncate_tail"
             groups = (
                 block_reclaim.get("groups")
                 if isinstance(block_reclaim, dict)
@@ -522,24 +529,6 @@ class TriAttentionScheduler(Scheduler):
                         "TriAttention block reclaim contains duplicate block ids: "
                         f"req={req_id} gid={gid} block_ids_after={block_ids_after}"
                     )
-                expected_prefix = curr_ids[:kept_len]
-                if expected_prefix != block_ids_after:
-                    raise RuntimeError(
-                        "TriAttention block reclaim prefix mismatch: "
-                        f"req={req_id} gid={gid} expected_prefix={expected_prefix} "
-                        f"actual_after={block_ids_after}"
-                    )
-                if (
-                    getattr(self.triattention_config, "require_physical_reclaim", False)
-                    and gid in expected_shrink_gids
-                    and kept_len != required_blocks
-                ):
-                    raise RuntimeError(
-                        "TriAttention block reclaim insufficient shrink: "
-                        f"req={req_id} gid={gid} kept_len={kept_len} "
-                        f"required_blocks={required_blocks}"
-                    )
-
                 # Use block_ids_before to distinguish old blocks (present
                 # when the hook ran) from new blocks appended by
                 # _update_states after the hook.  Only free old tail blocks
@@ -550,9 +539,73 @@ class TriAttentionScheduler(Scheduler):
                 else:
                     original_count = len(req_blocks)
                 new_blocks_this_step = list(req_blocks[original_count:])
-                kept_old_blocks = list(req_blocks[:kept_len])
-                removed_old_blocks = list(req_blocks[kept_len:original_count])
-                # Reassemble: kept old prefix + new blocks from this step
+                old_blocks = list(req_blocks[:original_count])
+
+                if reclaim_mode == "remap_tail":
+                    old_by_id = {block.block_id: block for block in old_blocks}
+                    missing_ids = [
+                        block_id
+                        for block_id in block_ids_after
+                        if block_id not in old_by_id
+                    ]
+                    if missing_ids:
+                        raise RuntimeError(
+                            "TriAttention block remap references unknown blocks: "
+                            f"req={req_id} gid={gid} missing={missing_ids} "
+                            f"curr_ids={curr_ids}"
+                        )
+                    kept_old_blocks = [old_by_id[block_id] for block_id in block_ids_after]
+                    removed_ids_raw = group.get("block_ids_removed")
+                    if (
+                        isinstance(removed_ids_raw, list)
+                        and all(isinstance(block_id, int) for block_id in removed_ids_raw)
+                    ):
+                        removed_ids = [
+                            block_id for block_id in removed_ids_raw
+                            if block_id in old_by_id
+                        ]
+                    else:
+                        kept_set = set(block_ids_after)
+                        removed_ids = [
+                            block.block_id
+                            for block in old_blocks
+                            if block.block_id not in kept_set
+                        ]
+                    kept_set = set(block_ids_after)
+                    removed_old_blocks = [
+                        old_by_id[block_id]
+                        for block_id in removed_ids
+                        if block_id in old_by_id and block_id not in kept_set
+                    ]
+                else:
+                    expected_prefix = curr_ids[:kept_len]
+                    if expected_prefix != block_ids_after:
+                        raise RuntimeError(
+                            "TriAttention block reclaim prefix mismatch: "
+                            f"req={req_id} gid={gid} "
+                            f"expected_prefix={expected_prefix} "
+                            f"actual_after={block_ids_after}"
+                        )
+                    if (
+                        getattr(
+                            self.triattention_config,
+                            "require_physical_reclaim",
+                            False,
+                        )
+                        and gid in expected_shrink_gids
+                        and kept_len != required_blocks
+                    ):
+                        raise RuntimeError(
+                            "TriAttention block reclaim insufficient shrink: "
+                            f"req={req_id} gid={gid} kept_len={kept_len} "
+                            f"required_blocks={required_blocks}"
+                        )
+                    kept_old_blocks = list(req_blocks[:kept_len])
+                    removed_old_blocks = list(req_blocks[kept_len:original_count])
+
+                # Reassemble: kept old blocks + new blocks from this step.
+                # remap_tail keeps old tail blocks in compact logical order;
+                # truncate_tail keeps the compacted old prefix.
                 reassembled = kept_old_blocks + new_blocks_this_step
                 manager.req_to_blocks[req_id] = reassembled
                 if req_id in manager.num_cached_block:
@@ -575,6 +628,8 @@ class TriAttentionScheduler(Scheduler):
             # Same safety as above: skip during chunked prefill without
             # block_ids_before to avoid freeing new blocks.
             missing_gids = expected_shrink_gids - seen_gids
+            if reclaim_mode == "remap_tail":
+                missing_gids = set()
             if missing_gids and _evt_scheduled <= 1:
                 for gid in sorted(missing_gids):
                     manager = managers[gid]
