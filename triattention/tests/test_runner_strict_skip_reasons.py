@@ -55,5 +55,17 @@ def test_zero_copy_recency_not_ready_is_allowed_in_strict_mode():
         log_decisions=False,
     )
 
-    assert events == []
+    assert events == [
+        {
+            "req_id": "req-1",
+            "step": 4,
+            "status": "skipped",
+            "reason": "zero_copy_recency_not_ready",
+            "cache_len_after": 4096,
+            "details": {},
+            "scheduled_tokens": 1,
+            "estimated_cache_len": 4096,
+            "prefill_len": 10000,
+        }
+    ]
     assert state_store.skipped["reason"] == "zero_copy_recency_not_ready"

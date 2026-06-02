@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "ascend-lazy-auto-recency-v9-20260602"
+RUNTIME_BUILD_ID = "ascend-auto-recency-profile-v10-20260602"
 
 
 def runtime_build_info() -> str:

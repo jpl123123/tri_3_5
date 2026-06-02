@@ -48,6 +48,21 @@ def execute_runner_compression_actions(
                         reason="batch_queue_dedup",
                         step=signal.step,
                     )
+                events.append(
+                    {
+                        "req_id": req_id,
+                        "step": signal.step,
+                        "status": "skipped",
+                        "reason": "batch_queue_dedup",
+                        "cache_len_after": None,
+                        "details": {"last_compression_step": last_step},
+                        "scheduled_tokens": sched_tokens,
+                        "estimated_cache_len": int(
+                            getattr(signal, "estimated_cache_len", 0)
+                        ),
+                        "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                    }
+                )
                 continue
         try:
             result = executor.execute(
@@ -204,6 +219,7 @@ def execute_runner_compression_actions(
             reason=result.reason,
             step=signal.step,
         )
+        details = result.details if isinstance(result.details, dict) else {}
         skip_logger = (
             logger.debug
             if result.reason
@@ -225,6 +241,21 @@ def execute_runner_compression_actions(
             signal.step,
             result.reason,
             result.cache_len_after,
-            result.details,
+            details,
+        )
+        events.append(
+            {
+                "req_id": req_id,
+                "step": signal.step,
+                "status": "skipped",
+                "reason": result.reason,
+                "cache_len_after": result.cache_len_after,
+                "details": details,
+                "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
+                "estimated_cache_len": int(
+                    getattr(signal, "estimated_cache_len", 0)
+                ),
+                "prefill_len": int(getattr(signal, "prefill_len", 0)),
+            }
         )
     return events

@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.structured_output import StructuredOutputManager
 
+from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
 from .effective_len_tracker import EffectiveCacheLenTracker
 from .kv_allocation_sync import (
@@ -133,6 +134,8 @@ class TriAttentionScheduler(Scheduler):
             log_stats=log_stats,
         )
         self.triattention_config = TriAttentionRuntimeConfig.from_env()
+        if _is_ascend_scheduler_instance(self):
+            apply_ascend_fast_recency_defaults(self.triattention_config)
         self._planner = CompressionPlanner(self.triattention_config)
         self._effective_len_tracker = EffectiveCacheLenTracker()
         self._prefill_lens: dict[str, int] = {}

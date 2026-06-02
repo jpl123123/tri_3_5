@@ -33,11 +33,27 @@ def test_auto_fast_recency_respects_explicit_user_mode():
     assert config.fast_recency_accuracy_guard
 
 
-def test_auto_fast_recency_respects_explicit_accuracy_guard():
+def test_auto_fast_recency_overrides_stale_accuracy_guard():
     config = TriAttentionRuntimeConfig(
         fast_recency_only=True,
         fast_recency_accuracy_guard=True,
         auto_fast_recency_on_ascend=True,
+    )
+
+    apply_ascend_fast_recency_defaults(
+        config,
+        env={"TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD": "1"},
+    )
+
+    assert config.fast_recency_only
+    assert not config.fast_recency_accuracy_guard
+
+
+def test_auto_fast_recency_can_be_disabled_to_keep_accuracy_guard():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=True,
+        fast_recency_accuracy_guard=True,
+        auto_fast_recency_on_ascend=False,
     )
 
     apply_ascend_fast_recency_defaults(

@@ -41,6 +41,7 @@ class TriAttentionPerfProfile:
     compress_applied: int = 0
     compress_skipped: int = 0
     compress_errors: int = 0
+    reclaimed_blocks: int = 0
     t_state_ms: float = 0.0
     t_compress_ms: float = 0.0
     t_reclaim_ms: float = 0.0
@@ -48,6 +49,9 @@ class TriAttentionPerfProfile:
     t_base_exec_ms: float = 0.0
     t_total_exec_ms: float = 0.0
     skip_reasons: Counter[str] = field(default_factory=Counter)
+    apply_reasons: Counter[str] = field(default_factory=Counter)
+    selector_statuses: Counter[str] = field(default_factory=Counter)
+    reclaim_modes: Counter[str] = field(default_factory=Counter)
     cudagraph_modes: Counter[str] = field(default_factory=Counter)
     sink_dir: str | None = None
 
@@ -100,8 +104,30 @@ class TriAttentionPerfProfile:
                 continue
             self.compress_calls += 1
             status = str(event.get("status", ""))
+            details = event.get("details")
+            if not isinstance(details, dict):
+                details = {}
             if status == "applied":
                 self.compress_applied += 1
+                reason = event.get("reason")
+                if isinstance(reason, str):
+                    self.apply_reasons[reason] += 1
+                selector_status = details.get("selector_status")
+                if isinstance(selector_status, str):
+                    self.selector_statuses[selector_status] += 1
+                block_reclaim = event.get("block_reclaim")
+                if not isinstance(block_reclaim, dict):
+                    block_reclaim = details.get("block_reclaim")
+                reclaim_mode = (
+                    block_reclaim.get("mode")
+                    if isinstance(block_reclaim, dict)
+                    else None
+                )
+                if isinstance(reclaim_mode, str):
+                    self.reclaim_modes[reclaim_mode] += 1
+                reclaimed = details.get("reclaimed_block_count")
+                if isinstance(reclaimed, int):
+                    self.reclaimed_blocks += max(0, reclaimed)
             elif status == "skipped":
                 self.compress_skipped += 1
                 reason = event.get("reason")
@@ -115,19 +141,30 @@ class TriAttentionPerfProfile:
         top_skips = ",".join(
             f"{reason}:{count}" for reason, count in self.skip_reasons.most_common(5)
         )
+        top_applied = ",".join(
+            f"{reason}:{count}" for reason, count in self.apply_reasons.most_common(5)
+        )
+        top_selectors = ",".join(
+            f"{reason}:{count}"
+            for reason, count in self.selector_statuses.most_common(5)
+        )
         line = (
             "TRIATTN_PERF "
             f"steps={self.total_steps} trig_steps={self.steps_with_trigger} "
             f"override_steps={self.steps_with_overrides} "
             f"compress_calls={self.compress_calls} applied={self.compress_applied} "
             f"skipped={self.compress_skipped} errors={self.compress_errors} "
+            f"reclaimed_blocks={self.reclaimed_blocks} "
             f"avg_ms(total={self.t_total_exec_ms / steps:.2f} "
             f"state={self.t_state_ms / steps:.2f} "
             f"compress={self.t_compress_ms / steps:.2f} "
             f"reclaim={self.t_reclaim_ms / steps:.2f} "
             f"override_prep={self.t_override_prep_ms / steps:.2f} "
             f"base_exec={self.t_base_exec_ms / steps:.2f}) "
+            f"top_apply_reasons={top_applied or 'none'} "
             f"top_skip_reasons={top_skips or 'none'} "
+            f"selector_statuses={top_selectors or 'none'} "
+            f"reclaim_modes={dict(self.reclaim_modes)} "
             f"cudagraph_modes={dict(self.cudagraph_modes)}"
         )
         self.logger.info("%s", line)
