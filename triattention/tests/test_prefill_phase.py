@@ -1,0 +1,101 @@
+from types import SimpleNamespace
+
+from triattention.vllm.runtime.config import TriAttentionRuntimeConfig
+from triattention.vllm.runtime.hook_runtime_context import build_hook_runtime_context
+from triattention.vllm.runtime.prefill_phase import (
+    is_prefill_phase_for_limit,
+    is_request_scheduled_as_prefill,
+)
+from triattention.vllm.runtime.signals import CompressionSignal
+
+
+class _AscendRunner:
+    pass
+
+
+_AscendRunner.__module__ = "vllm_ascend.test"
+
+
+def _signal():
+    return CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=2048,
+        step=10,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=10000,
+        scheduled_tokens=1,
+    )
+
+
+def test_prefill_phase_uses_scheduler_new_reqs():
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(req_id="req-1")],
+    )
+
+    assert is_request_scheduled_as_prefill(scheduler_output, "req-1")
+    assert is_prefill_phase_for_limit(
+        scheduler_output=scheduler_output,
+        req_id="req-1",
+        scheduled_tokens=1,
+        prefill_len=10000,
+        num_computed_tokens=10000,
+    )
+
+
+def test_decode_after_compression_is_not_prefill_limit():
+    context = build_hook_runtime_context(
+        base_runner=_AscendRunner(),
+        config=TriAttentionRuntimeConfig(
+            prefill_max_compressions_on_ascend=1,
+            enable_experimental_kv_compaction=True,
+            defer_prefill_compression_on_ascend=False,
+        ),
+        req_id="req-1",
+        req_state=SimpleNamespace(num_computed_tokens=10000, block_ids=[[1] * 16]),
+        req_runtime_state=SimpleNamespace(
+            compression_count=1,
+            current_cache_len=2048,
+            last_absorbed_cache_len=2048,
+        ),
+        signal=_signal(),
+        scheduler_output=SimpleNamespace(
+            scheduled_new_reqs=[],
+            num_scheduled_tokens={"req-1": 1},
+        ),
+        compressed_once={"req-1"},
+        original_block_ids_by_group=[[1] * 16],
+        block_size_hint=128,
+    )
+
+    assert context.defer_reason != "prefill_compression_limit"
+
+
+def test_prefill_after_compression_still_hits_prefill_limit():
+    context = build_hook_runtime_context(
+        base_runner=_AscendRunner(),
+        config=TriAttentionRuntimeConfig(
+            prefill_max_compressions_on_ascend=1,
+            enable_experimental_kv_compaction=True,
+            defer_prefill_compression_on_ascend=False,
+        ),
+        req_id="req-1",
+        req_state=SimpleNamespace(num_computed_tokens=4096, block_ids=[[1] * 16]),
+        req_runtime_state=SimpleNamespace(
+            compression_count=1,
+            current_cache_len=2048,
+            last_absorbed_cache_len=2048,
+        ),
+        signal=_signal(),
+        scheduler_output=SimpleNamespace(
+            scheduled_new_reqs=[],
+            num_scheduled_tokens={"req-1": 1},
+        ),
+        compressed_once={"req-1"},
+        original_block_ids_by_group=[[1] * 16],
+        block_size_hint=128,
+    )
+
+    assert context.defer_reason == "prefill_compression_limit"

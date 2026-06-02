@@ -12,6 +12,7 @@ from .config import TriAttentionRuntimeConfig
 from .executor import CompressionExecutor, RunnerHookCompressionExecutor
 from .fast_recency_guard import should_guard_fast_recency_long_context
 from .input_patch_backend import install_runtime_input_patch
+from .prefill_phase import is_prefill_phase_for_limit
 from .request_key_compat import get_scheduled_token_items
 from .runner_compression_actions import execute_runner_compression_actions
 from .runner_output_bridge import (
@@ -265,11 +266,27 @@ class TriAttentionModelRunner:
             existing_estimate = int(
                 getattr(existing, "estimated_cache_len", 0) or 0
             ) if existing is not None else 0
-            is_prefill_step = (
+            is_prefill_step_for_threshold = (
                 scheduled_tokens_i > 1
                 or (prefill_len > 0 and 0 < existing_estimate < prefill_len)
             )
-            if defer_chunked_prefill and is_prefill_step:
+            req_state = None
+            requests = getattr(self._base_runner, "requests", None)
+            if isinstance(requests, dict):
+                req_state = requests.get(req_id)
+            num_computed_tokens = (
+                int(getattr(req_state, "num_computed_tokens", 0))
+                if req_state is not None
+                else None
+            )
+            is_prefill_step_for_limit = is_prefill_phase_for_limit(
+                scheduler_output=scheduler_output,
+                req_id=req_id,
+                scheduled_tokens=scheduled_tokens_i,
+                prefill_len=prefill_len,
+                num_computed_tokens=num_computed_tokens,
+            )
+            if defer_chunked_prefill and is_prefill_step_for_threshold:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
                     if hasattr(self.state_store, "mark_compression_skipped"):
@@ -290,7 +307,7 @@ class TriAttentionModelRunner:
                 or 0
             )
             if (
-                is_prefill_step
+                is_prefill_step_for_limit
                 and is_ascend
                 and int(getattr(state, "compression_count", 0) or 0)
                 >= max_prefill_compressions
@@ -330,17 +347,13 @@ class TriAttentionModelRunner:
                     kv_from_blocks = True
                 else:
                     # Fallback: base_runner.requests (may be stale).
-                    req_state = None
-                    requests = getattr(self._base_runner, "requests", None)
-                    if isinstance(requests, dict):
-                        req_state = requests.get(req_id)
                     if req_state is not None:
                         actual_kv = int(getattr(req_state, "num_computed_tokens", 0))
                     else:
                         continue
             threshold = self._compression_threshold(
                 prefill_len,
-                is_prefill_step=is_prefill_step,
+                is_prefill_step=is_prefill_step_for_threshold,
             )
             if kv_from_blocks:
                 # Block table capacity already covers scheduled tokens.

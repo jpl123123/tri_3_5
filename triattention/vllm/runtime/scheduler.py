@@ -23,6 +23,7 @@ from .kv_allocation_sync import (
     update_request_effective_kv_offset,
 )
 from .planner import CompressionPlanner
+from .prefill_phase import is_prefill_phase_for_limit
 from .request_key_compat import iter_scheduled_token_items
 from .signals import CompressionSignal
 from .thresholds import compression_length_threshold, is_ascend_environment_available
@@ -140,6 +141,7 @@ class TriAttentionScheduler(Scheduler):
         self._planner = CompressionPlanner(self.triattention_config)
         self._effective_len_tracker = EffectiveCacheLenTracker()
         self._prefill_lens: dict[str, int] = {}
+        self._prefill_compression_counts: dict[str, int] = {}
         self._length_threshold_cache: dict[str, int] = {}
         self._triattention_step = 0
 
@@ -224,6 +226,7 @@ class TriAttentionScheduler(Scheduler):
             if req is not None:
                 clear_request_allocation_sync_state(req)
             self._prefill_lens.pop(req_id, None)
+            self._prefill_compression_counts.pop(req_id, None)
             self._length_threshold_cache.pop(req_id, None)
             self._effective_len_tracker.remove_request(req_id)
 
@@ -289,6 +292,27 @@ class TriAttentionScheduler(Scheduler):
             ):
                 continue
             is_prefill_step = scheduled_tokens_i > 1
+            is_prefill_step_for_limit = is_prefill_phase_for_limit(
+                scheduler_output=scheduler_output,
+                req_id=req_id,
+                scheduled_tokens=scheduled_tokens_i,
+                prefill_len=prefill_len,
+                num_computed_tokens=int(getattr(request, "num_computed_tokens", 0)),
+            )
+            if (
+                _is_ascend_scheduler_instance(self)
+                and is_prefill_step_for_limit
+                and self._prefill_compression_counts.get(req_id, 0)
+                >= int(
+                    getattr(
+                        self.triattention_config,
+                        "prefill_max_compressions_on_ascend",
+                        1,
+                    )
+                    or 0
+                )
+            ):
+                continue
             has_override = self._effective_len_tracker.has_effective_len_override(req_id)
             if has_override:
                 effective_base_len = self._effective_len_tracker.observe_num_computed(
@@ -471,6 +495,21 @@ class TriAttentionScheduler(Scheduler):
             req = self.requests.get(req_id)
             if req is None:
                 continue
+            prefill_len = self._prefill_lens.get(req_id)
+            if prefill_len is None:
+                try:
+                    prefill_len = int(event.get("prefill_len", 0) or 0)
+                except Exception:
+                    prefill_len = 0
+            scheduled_tokens = int(event.get("scheduled_tokens", 1) or 1)
+            num_computed_tokens = int(getattr(req, "num_computed_tokens", 0) or 0)
+            if (
+                scheduled_tokens > 1
+                or (prefill_len > 0 and num_computed_tokens < prefill_len)
+            ):
+                self._prefill_compression_counts[req_id] = (
+                    self._prefill_compression_counts.get(req_id, 0) + 1
+                )
             self._effective_len_tracker.apply_compression(
                 req_id=req_id,
                 cache_len_after=cache_len_after,
@@ -747,5 +786,6 @@ class TriAttentionScheduler(Scheduler):
 
         for req_id in scheduler_output.finished_req_ids:
             self._prefill_lens.pop(req_id, None)
+            self._prefill_compression_counts.pop(req_id, None)
             self._effective_len_tracker.remove_request(req_id)
         return outputs
