@@ -45,6 +45,8 @@ export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND=1
 export TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=0
 export TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=1
 export TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=1
+export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
+export TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND=0
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -150,6 +152,12 @@ block remap by default instead of copying KV tensors; the expected compression
 reason is `kv_compacted:zero_copy_tail`. To compare against the older copy path,
 set `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY=0`.
 
+For correctness on long prompts, `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD`
+defaults to `1`: when `TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, sparse-stat
+TriAttention selection is used instead of pure recency, even if
+`TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1` is left in the environment. Pure recency
+is a performance diagnostic and can degrade or repeat on 20k+ prompts.
+
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for
 debugging with `TRIATTN_RUNTIME_ENABLE_ASYNC_COMPRESSION_BOUNDARY=1`.
@@ -159,6 +167,10 @@ initialization by default. This avoids first-request patch installation and ACL
 graph replay in the measured request path. To compare against the older lazy
 behavior, set `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=0` and
 `TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=0`.
+
+`TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND` is disabled by default. It
+is an experimental slot-mapping micro-optimization and should only be enabled
+after validating output quality for the target vLLM-Ascend build.
 
 ## Calibration Stats
 

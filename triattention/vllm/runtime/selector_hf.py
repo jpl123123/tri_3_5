@@ -38,7 +38,11 @@ def build_triattention_selector(
     strict_triton_required = bool(
         config.enable_experimental_kv_compaction and config.require_triton_scoring
     )
-    if bool(getattr(config, "fast_recency_only", False)):
+    recency_accuracy_guarded = (
+        bool(getattr(config, "fast_recency_accuracy_guard", True))
+        and config.sparse_stats_path is not None
+    )
+    if bool(getattr(config, "fast_recency_only", False)) and not recency_accuracy_guarded:
 
         def _select_keep_indices_recency(
             *,

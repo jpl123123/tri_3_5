@@ -64,6 +64,7 @@ def prepare_effective_input_overrides(
     base_runner: Any,
     state_store: Any,
     scheduler_output: Any,
+    config: Any | None = None,
 ) -> EffectiveInputOverrides:
     req_states = getattr(base_runner, "req_states", None)
     requests = getattr(base_runner, "requests", None)
@@ -77,6 +78,9 @@ def prepare_effective_input_overrides(
     expected_req_row_indices: tuple[int, ...] | None = None
     expected_query_lens: tuple[int, ...] | None = None
     scheduled_items = get_scheduled_token_items(scheduler_output)
+    enable_packed_pos_delta = bool(
+        getattr(config, "enable_packed_pos_delta_on_ascend", False)
+    )
     if isinstance(req_id_to_index, dict):
         row_indices: list[int] = []
         q_lens: list[int] = []
@@ -90,7 +94,7 @@ def prepare_effective_input_overrides(
             req_idx = int(req_idx)
             q_len = int(scheduled_tokens)
             delta = int((pos_delta_map or {}).get(req_idx, 0))
-            if q_len > 0:
+            if enable_packed_pos_delta and q_len > 0:
                 packed_deltas.extend([delta] * q_len)
             if sparse_override_req_rows and req_idx not in sparse_override_req_rows:
                 continue

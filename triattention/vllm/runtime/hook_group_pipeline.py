@@ -59,6 +59,11 @@ def try_build_recency_tail_block_remap(
     """
     if not bool(getattr(config, "fast_recency_only", False)):
         return None
+    if (
+        bool(getattr(config, "fast_recency_accuracy_guard", True))
+        and getattr(config, "sparse_stats_path", None) is not None
+    ):
+        return None
     if not bool(getattr(config, "enable_zero_copy_recency", True)):
         return None
     if not bool(getattr(config, "enable_experimental_block_reclaim", False)):

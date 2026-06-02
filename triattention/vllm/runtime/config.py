@@ -47,11 +47,13 @@ class TriAttentionRuntimeConfig:
     score_max_layers: int = 0
     score_layer_stride: int = 1
     fast_recency_only: bool = False
+    fast_recency_accuracy_guard: bool = True
     min_reclaim_blocks: int = 1
     min_reclaim_blocks_on_ascend: int = 8
     log_all_worker_events: bool = False
     enable_async_compression_boundary: bool = False
     enable_zero_copy_recency: bool = True
+    enable_packed_pos_delta_on_ascend: bool = False
     early_install_proxy_on_ascend: bool = True
     preinstall_input_patch: bool = True
 
@@ -166,6 +168,10 @@ class TriAttentionRuntimeConfig:
                 "FAST_RECENCY_ONLY",
                 cls.fast_recency_only,
             ),
+            fast_recency_accuracy_guard=maybe_bool(
+                "FAST_RECENCY_ACCURACY_GUARD",
+                cls.fast_recency_accuracy_guard,
+            ),
             min_reclaim_blocks=maybe_int(
                 "MIN_RECLAIM_BLOCKS",
                 cls.min_reclaim_blocks,
@@ -185,6 +191,10 @@ class TriAttentionRuntimeConfig:
             enable_zero_copy_recency=maybe_bool(
                 "ENABLE_ZERO_COPY_RECENCY",
                 cls.enable_zero_copy_recency,
+            ),
+            enable_packed_pos_delta_on_ascend=maybe_bool(
+                "ENABLE_PACKED_POS_DELTA_ON_ASCEND",
+                cls.enable_packed_pos_delta_on_ascend,
             ),
             early_install_proxy_on_ascend=maybe_bool(
                 "EARLY_INSTALL_PROXY_ON_ASCEND",

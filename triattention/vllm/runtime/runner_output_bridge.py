@@ -24,6 +24,7 @@ def execute_base_model_with_effective_overrides(
     scheduler_output: Any,
     intermediate_tensors: Any = None,
     use_effective_overrides: bool = True,
+    config: Any | None = None,
     perf_out: dict[str, float] | None = None,
 ) -> Any:
     """Execute base runner with current effective-length overrides applied."""
@@ -47,6 +48,7 @@ def execute_base_model_with_effective_overrides(
         base_runner=base_runner,
         state_store=state_store,
         scheduler_output=scheduler_output,
+        config=config,
     )
     if perf_enabled:
         t1 = time.perf_counter()

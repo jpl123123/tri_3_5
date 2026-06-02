@@ -521,6 +521,7 @@ class TriAttentionModelRunner:
             scheduler_output=scheduler_output,
             intermediate_tensors=intermediate_tensors,
             use_effective_overrides=need_effective_overrides,
+            config=self.config,
             perf_out=bridge_perf,
         )
         self._perf.record_model_output(output)
