@@ -20,6 +20,15 @@ def _debug_drop_seq_base() -> bool:
     return os.environ.get("TRIATTN_DEBUG_V1_DROP_SEQ_BASE", "0") == "1"
 
 
+def _debug_disable_max_seq_len_override() -> bool:
+    return (
+        os.environ.get("TRIATTN_DEBUG_DISABLE_ASCEND_MAX_SEQ_LEN_OVERRIDE", "0")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
 def _build_effective_slot_positions_tensor(
     *,
     idx_mapping: torch.Tensor,
@@ -111,6 +120,31 @@ def _apply_sparse_seq_len_overrides_cpu(
     return matched > 0
 
 
+def _effective_max_seq_len_from_np(
+    *,
+    seq_lens_np: Any,
+    num_reqs: Any,
+) -> int | None:
+    if _debug_disable_max_seq_len_override():
+        return None
+    if not isinstance(seq_lens_np, np.ndarray):
+        return None
+    try:
+        num_reqs_i = int(num_reqs)
+    except (TypeError, ValueError):
+        return None
+    if num_reqs_i <= 0:
+        return None
+    active = seq_lens_np[:num_reqs_i]
+    if active.size <= 0:
+        return None
+    try:
+        max_seq_len = int(active.max(initial=0))
+    except TypeError:
+        max_seq_len = int(active.max())
+    return max(1, max_seq_len)
+
+
 def make_patched_ascend_v2_update_seq_lens_cpu(
     original_update_seq_lens_cpu: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -141,6 +175,31 @@ def make_patched_ascend_v2_update_seq_lens_cpu(
         return out
 
     return _patched_update_seq_lens_cpu
+
+
+def make_patched_ascend_v2_build_attn_metadata(
+    original_build_attn_metadata: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Patch Ascend V2 attention metadata to use effective max seq length."""
+
+    def _patched_build_attn_metadata(*args, **kwargs):
+        if not _patch_state.ACTIVE_EFFECTIVE_OVERRIDES_ENABLED:
+            return original_build_attn_metadata(*args, **kwargs)
+        effective_max_seq_len = _effective_max_seq_len_from_np(
+            seq_lens_np=kwargs.get("seq_lens_np"),
+            num_reqs=kwargs.get("num_reqs"),
+        )
+        if effective_max_seq_len is None:
+            return original_build_attn_metadata(*args, **kwargs)
+        original_max = kwargs.get("max_seq_len")
+        try:
+            original_max_i = int(original_max)
+        except (TypeError, ValueError):
+            original_max_i = effective_max_seq_len
+        kwargs["max_seq_len"] = min(original_max_i, effective_max_seq_len)
+        return original_build_attn_metadata(*args, **kwargs)
+
+    return _patched_build_attn_metadata
 
 
 def make_patched_ascend_v2_compute_slot_mappings(

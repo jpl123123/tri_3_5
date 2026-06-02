@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "ascend-prefill-phase-filter-v14-20260602"
+RUNTIME_BUILD_ID = "ascend-decode-tight-reclaim-v15-20260602"
 
 
 def runtime_build_info() -> str:

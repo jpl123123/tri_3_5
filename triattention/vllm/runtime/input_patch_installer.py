@@ -7,6 +7,7 @@ from typing import Any, Callable
 from vllm.logger import logger
 
 from .input_patch_ascend_backend import (
+    make_patched_ascend_v2_build_attn_metadata,
     make_patched_ascend_v2_compute_slot_mappings,
     make_patched_ascend_v2_update_seq_lens_cpu,
 )
@@ -24,6 +25,8 @@ _ORIGINAL_ASCEND_V1_PREPARE_INPUTS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU: Callable[..., Any] | None = None
 _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
+_ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA: Callable[..., Any] | None = None
 
 
 def _debug_disable_v1_override_path() -> bool:
@@ -45,6 +48,8 @@ def install_runtime_input_patch_hooks() -> bool:
     global _ORIGINAL_ASCEND_V2_PREPARE_POS_SEQ_LENS
     global _ORIGINAL_ASCEND_V2_UPDATE_SEQ_LENS_CPU
     global _ORIGINAL_ASCEND_V2_COMPUTE_SLOT_MAPPINGS
+    global _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA
+    global _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA
     if _PATCH_INSTALLED:
         return True
 
@@ -138,6 +143,54 @@ def install_runtime_input_patch_hooks() -> bool:
             )
             patched_any = True
             patched_targets.append("vllm_ascend.worker.v2.model_runner.NPUModelRunner")
+
+    try:
+        import vllm_ascend.worker.v2.attn_utils as ascend_attn_utils_v2
+    except Exception:
+        ascend_attn_utils_v2 = None
+    patched_ascend_build_attn_metadata = None
+    if ascend_attn_utils_v2 is not None:
+        original_build_attn_metadata = getattr(
+            ascend_attn_utils_v2,
+            "build_attn_metadata",
+            None,
+        )
+        if original_build_attn_metadata is not None:
+            _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA = original_build_attn_metadata
+            patched_ascend_build_attn_metadata = (
+                make_patched_ascend_v2_build_attn_metadata(
+                    _ORIGINAL_ASCEND_V2_BUILD_ATTN_METADATA
+                )
+            )
+            ascend_attn_utils_v2.build_attn_metadata = patched_ascend_build_attn_metadata
+            patched_any = True
+            patched_targets.append("vllm_ascend.worker.v2.attn_utils.build_attn_metadata")
+
+    try:
+        import vllm_ascend.worker.v2.model_states.default as ascend_default_state_v2
+    except Exception:
+        ascend_default_state_v2 = None
+    if ascend_default_state_v2 is not None:
+        original_default_build_attn_metadata = getattr(
+            ascend_default_state_v2,
+            "build_attn_metadata",
+            None,
+        )
+        if original_default_build_attn_metadata is not None:
+            _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA = (
+                original_default_build_attn_metadata
+            )
+            if patched_ascend_build_attn_metadata is None:
+                patched_ascend_build_attn_metadata = (
+                    make_patched_ascend_v2_build_attn_metadata(
+                        _ORIGINAL_ASCEND_V2_DEFAULT_BUILD_ATTN_METADATA
+                    )
+                )
+            ascend_default_state_v2.build_attn_metadata = patched_ascend_build_attn_metadata
+            patched_any = True
+            patched_targets.append(
+                "vllm_ascend.worker.v2.model_states.default.build_attn_metadata"
+            )
 
     try:
         import vllm_ascend.worker.v2.block_table as ascend_block_table_v2
