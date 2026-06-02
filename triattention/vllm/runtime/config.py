@@ -60,7 +60,8 @@ class TriAttentionRuntimeConfig:
     enable_zero_copy_recency: bool = True
     zero_copy_recency_only_on_ascend: bool = True
     enable_packed_pos_delta_on_ascend: bool = False
-    early_install_proxy_on_ascend: bool = True
+    auto_fast_recency_on_ascend: bool = True
+    early_install_proxy_on_ascend: bool = False
     preinstall_input_patch: bool = True
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
@@ -230,6 +231,10 @@ class TriAttentionRuntimeConfig:
             enable_packed_pos_delta_on_ascend=maybe_bool(
                 "ENABLE_PACKED_POS_DELTA_ON_ASCEND",
                 cls.enable_packed_pos_delta_on_ascend,
+            ),
+            auto_fast_recency_on_ascend=maybe_bool(
+                "AUTO_FAST_RECENCY_ON_ASCEND",
+                cls.auto_fast_recency_on_ascend,
             ),
             early_install_proxy_on_ascend=maybe_bool(
                 "EARLY_INSTALL_PROXY_ON_ASCEND",

@@ -13,6 +13,7 @@ try:
 except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
     VLLMGPUWorker = object  # type: ignore[assignment]
 
+from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
 from .runner import TriAttentionModelRunner
@@ -72,6 +73,7 @@ def _apply_ascend_perf_defaults(
 ) -> None:
     if not _looks_like_ascend_runtime(worker, model_runner):
         return
+    apply_ascend_fast_recency_defaults(config)
     if int(getattr(config, "score_max_layers", 0) or 0) > 0:
         return
     limit = max(0, int(getattr(config, "score_max_layers_on_ascend", 0) or 0))
@@ -256,6 +258,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             "fast_recency_only=%s fast_recency_accuracy_guard=%s "
             "fast_recency_long_context_guard=%s "
             "fast_recency_long_context_guard_tokens=%d "
+            "auto_fast_recency_on_ascend=%s "
+            "early_install_proxy_on_ascend=%s "
             "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
             "build=%s",
             "eagerly" if installing_during_init else "lazily",
@@ -274,6 +278,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             bool(getattr(config, "fast_recency_accuracy_guard", True)),
             bool(getattr(config, "fast_recency_long_context_guard", True)),
             int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0),
+            bool(getattr(config, "auto_fast_recency_on_ascend", True)),
+            bool(getattr(config, "early_install_proxy_on_ascend", False)),
             bool(getattr(config, "enable_zero_copy_recency", True)),
             bool(getattr(config, "zero_copy_recency_only_on_ascend", True)),
             RUNTIME_BUILD_ID,

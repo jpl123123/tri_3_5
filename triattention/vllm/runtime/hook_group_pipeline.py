@@ -95,19 +95,19 @@ def try_build_recency_tail_block_remap(
         before_required = num_required_blocks(group_total_tokens, block_size)
         if before_required <= budget_blocks:
             return None
-        # Avoid remapping when this step has already allocated extra blocks
-        # beyond the KV tokens being compressed. The generic copy path has
-        # additional logic to preserve such just-appended blocks safely.
-        if len(normalized_block_ids) != before_required:
+        if len(normalized_block_ids) < before_required:
             return None
         start_block = before_required - budget_blocks
-        kept_block_ids = list(normalized_block_ids[start_block:before_required])
-        if len(kept_block_ids) != budget_blocks:
+        kept_tail_block_ids = list(normalized_block_ids[start_block:before_required])
+        if len(kept_tail_block_ids) != budget_blocks:
             return None
-        removed_block_ids = (
-            list(normalized_block_ids[:start_block])
-            + list(normalized_block_ids[before_required:])
-        )
+        # Decode may allocate the current token's destination block before the
+        # token is written into KV. Preserve those trailing blocks while still
+        # remapping the already-computed KV tail, otherwise the first decode
+        # compression opportunity degenerates into zero_copy_recency_not_ready.
+        trailing_block_ids = list(normalized_block_ids[before_required:])
+        kept_block_ids = kept_tail_block_ids + trailing_block_ids
+        removed_block_ids = list(normalized_block_ids[:start_block])
         group_cache_len_after = group_total_tokens - start_block * block_size
         if group_cache_len_after <= 0 or group_cache_len_after > budget_total:
             return None

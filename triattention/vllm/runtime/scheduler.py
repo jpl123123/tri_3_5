@@ -150,6 +150,8 @@ class TriAttentionScheduler(Scheduler):
             "fast_recency_only=%s fast_recency_accuracy_guard=%s "
             "fast_recency_long_context_guard=%s "
             "fast_recency_long_context_guard_tokens=%d "
+            "auto_fast_recency_on_ascend=%s "
+            "early_install_proxy_on_ascend=%s "
             "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
             "build=%s",
             self.triattention_config.kv_budget,
@@ -167,6 +169,8 @@ class TriAttentionScheduler(Scheduler):
             self.triattention_config.fast_recency_accuracy_guard,
             self.triattention_config.fast_recency_long_context_guard,
             self.triattention_config.fast_recency_long_context_guard_tokens,
+            self.triattention_config.auto_fast_recency_on_ascend,
+            self.triattention_config.early_install_proxy_on_ascend,
             self.triattention_config.enable_zero_copy_recency,
             self.triattention_config.zero_copy_recency_only_on_ascend,
             RUNTIME_BUILD_ID,
