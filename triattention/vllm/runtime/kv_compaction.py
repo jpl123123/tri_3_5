@@ -377,6 +377,7 @@ def compact_request_kv_in_place(
     keep_token_indices: Iterable[int] | torch.Tensor,
     total_tokens: int,
     preserve_dropped_tokens: bool = True,
+    prefix_only: bool = False,
 ) -> int:
     """Compact KV for a single request in-place.
 
@@ -384,6 +385,8 @@ def compact_request_kv_in_place(
     - Reorders tokens into [kept..., dropped...] permutation in-place.
     - Preserves the full token multiset (no tail zeroing).
     - Does not modify block_ids or scheduler metadata.
+    - With prefix_only=True, writes only the ordered kept prefix. Use this only
+      when the dropped tail blocks are physically reclaimed in the same step.
 
     Note:
     We intentionally avoid writing zero tails while request logical length is
@@ -416,7 +419,15 @@ def compact_request_kv_in_place(
         raise ValueError("keep_token_indices must not contain duplicates")
 
     keep_count = int(keep_tensor.numel())
-    if preserve_dropped_tokens:
+    if prefix_only:
+        if keep_count >= total_tokens:
+            return keep_count
+        prefix = torch.arange(keep_count, device=device, dtype=torch.long)
+        if torch.equal(keep_tensor, prefix):
+            return keep_count
+        perm_tensor = keep_tensor
+        dst_tokens = prefix
+    elif preserve_dropped_tokens:
         if keep_count >= total_tokens:
             return keep_count
         prefix = torch.arange(keep_count, device=device, dtype=torch.long)
@@ -482,11 +493,14 @@ def compact_request_kv_in_place_per_head(
     keep_token_indices_per_head: list[list[int]] | torch.Tensor,
     total_tokens: int,
     preserve_dropped_tokens: bool = True,
+    prefix_only: bool = False,
 ) -> int:
     """Compact KV in-place using independent keep indices for each KV head.
 
     Reorder each head with [kept..., dropped...] permutation while preserving
     all tokens per head (no tail zeroing).
+    With prefix_only=True, write only the ordered kept prefix for same-step
+    physical tail-block reclaim.
     """
     key_cache, value_cache = _split_kv_axes(kv_cache)
     device = key_cache.device
@@ -526,7 +540,41 @@ def compact_request_kv_in_place_per_head(
     if keep_count > 1 and bool((sorted_keep[:, 1:] == sorted_keep[:, :-1]).any().item()):
         raise ValueError("per-head keep indices must not contain duplicates")
 
-    if preserve_dropped_tokens:
+    if prefix_only:
+        prefix = torch.arange(keep_count, device=device, dtype=torch.long).unsqueeze(0)
+        prefix = prefix.expand(num_kv_heads, -1)
+        if torch.equal(keep_tensor, prefix):
+            return keep_count
+        src_blocks, src_off = _resolve_token_slots(
+            block_ids=block_ids,
+            block_size=block_size,
+            token_indices=keep_tensor,
+            device=device,
+        )
+        head_idx = torch.arange(num_kv_heads, device=device, dtype=torch.long).unsqueeze(1)
+        gathered_keys = key_cache[src_blocks, src_off, head_idx].clone()
+        gathered_values = value_cache[src_blocks, src_off, head_idx].clone()
+
+        dst_tokens = torch.arange(keep_count, device=device, dtype=torch.long)
+        dst_blocks, dst_off = _resolve_token_slots(
+            block_ids=block_ids,
+            block_size=block_size,
+            token_indices=dst_tokens,
+            device=device,
+        )
+        key_cache[dst_blocks, dst_off] = gathered_keys.permute(1, 0, 2).contiguous()
+        value_cache[dst_blocks, dst_off] = gathered_values.permute(1, 0, 2).contiguous()
+
+        if _debug_validate_compaction_content() and keep_count > 0:
+            actual_keys = key_cache[dst_blocks, dst_off]
+            actual_values = value_cache[dst_blocks, dst_off]
+            expected_keys = gathered_keys.permute(1, 0, 2).contiguous()
+            expected_values = gathered_values.permute(1, 0, 2).contiguous()
+            if not torch.equal(actual_keys, expected_keys):
+                raise RuntimeError("TRIATTN_DEBUG_COMPACTION_KEY_MISMATCH:per_head_prefix_content_mismatch")
+            if not torch.equal(actual_values, expected_values):
+                raise RuntimeError("TRIATTN_DEBUG_COMPACTION_VALUE_MISMATCH:per_head_prefix_content_mismatch")
+    elif preserve_dropped_tokens:
         prefix = torch.arange(keep_count, device=device, dtype=torch.long).unsqueeze(0)
         prefix = prefix.expand(num_kv_heads, -1)
         if torch.equal(keep_tensor, prefix):

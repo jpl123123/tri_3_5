@@ -33,11 +33,49 @@ def _should_early_install_proxy(worker: Any, config: TriAttentionRuntimeConfig) 
     if not bool(getattr(config, "early_install_proxy_on_ascend", True)):
         return False
     model_runner = getattr(worker, "model_runner", None)
-    return (
-        is_ascend_runtime(worker)
-        or is_ascend_runtime(model_runner)
-        or is_ascend_environment_available()
-    )
+    return _looks_like_ascend_runtime(worker, model_runner)
+
+
+def _looks_like_ascend_runtime(*objects: Any) -> bool:
+    if is_ascend_environment_available():
+        return True
+    for obj in objects:
+        if obj is None:
+            continue
+        if is_ascend_runtime(obj):
+            return True
+        candidates = [
+            obj,
+            getattr(obj, "model_runner", None),
+            getattr(obj, "device_config", None),
+            getattr(getattr(obj, "vllm_config", None), "device_config", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = (
+                f"{getattr(type(candidate), '__module__', '')} "
+                f"{getattr(type(candidate), '__qualname__', '')} "
+                f"{getattr(candidate, 'device', '')} "
+                f"{getattr(candidate, 'device_type', '')}"
+            ).lower()
+            if "vllm_ascend" in text or "ascend" in text or "npu" in text:
+                return True
+    return False
+
+
+def _apply_ascend_perf_defaults(
+    worker: Any,
+    model_runner: Any,
+    config: TriAttentionRuntimeConfig,
+) -> None:
+    if not _looks_like_ascend_runtime(worker, model_runner):
+        return
+    if int(getattr(config, "score_max_layers", 0) or 0) > 0:
+        return
+    limit = max(0, int(getattr(config, "score_max_layers_on_ascend", 0) or 0))
+    if limit > 0:
+        config.score_max_layers = limit
 
 
 def _maybe_backfill_model_path(worker: Any, config: TriAttentionRuntimeConfig) -> None:
@@ -183,6 +221,7 @@ class TriAttentionWorker(VLLMGPUWorker):
         config = getattr(self, "_triattention_runtime_config", None) or TriAttentionRuntimeConfig.from_env()
         _maybe_backfill_model_path(self, config)
         base_runner = self.model_runner
+        _apply_ascend_perf_defaults(self, base_runner, config)
         install_runner_compression_hook(base_runner=base_runner, config=config)
         self.model_runner = TriAttentionModelRunner(
             base_runner=base_runner,
@@ -192,7 +231,7 @@ class TriAttentionWorker(VLLMGPUWorker):
         logger.info(
             "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
             "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
-            "window_size=%s",
+            "window_size=%s score_max_layers=%d score_layer_stride=%d",
             "eagerly" if installing_during_init else "lazily",
             config.kv_budget,
             config.divide_length,
@@ -201,6 +240,8 @@ class TriAttentionWorker(VLLMGPUWorker):
             str(config.model_path) if config.model_path is not None else None,
             config.protect_prefill,
             config.window_size,
+            int(getattr(config, "score_max_layers", 0) or 0),
+            int(getattr(config, "score_layer_stride", 1) or 1),
         )
 
     def execute_model(self, scheduler_output):  # type: ignore[override]

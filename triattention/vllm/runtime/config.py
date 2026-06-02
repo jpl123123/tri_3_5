@@ -45,6 +45,7 @@ class TriAttentionRuntimeConfig:
     defer_prefill_compression_on_ascend: bool = True
     score_chunk_max_tokens: int = 4096
     score_max_layers: int = 0
+    score_max_layers_on_ascend: int = 8
     score_layer_stride: int = 1
     fast_recency_only: bool = False
     fast_recency_accuracy_guard: bool = True
@@ -159,6 +160,10 @@ class TriAttentionRuntimeConfig:
             score_max_layers=maybe_int(
                 "SCORE_MAX_LAYERS",
                 cls.score_max_layers,
+            ),
+            score_max_layers_on_ascend=maybe_int(
+                "SCORE_MAX_LAYERS_ON_ASCEND",
+                cls.score_max_layers_on_ascend,
             ),
             score_layer_stride=maybe_int(
                 "SCORE_LAYER_STRIDE",
@@ -338,6 +343,11 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "score_max_layers must be >= 0, "
                 f"got {self.score_max_layers}"
+            )
+        if self.score_max_layers_on_ascend < 0:
+            raise ValueError(
+                "score_max_layers_on_ascend must be >= 0, "
+                f"got {self.score_max_layers_on_ascend}"
             )
         if self.score_layer_stride < 1:
             raise ValueError(

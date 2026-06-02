@@ -68,37 +68,60 @@ def compact_layer_with_keep_plan(
     keep_count = keep_plan.keep_count()
     before_required = num_required_blocks(total_tokens, block_size)
     after_required = num_required_blocks(keep_count, block_size)
+    prefix_only_compaction = False
     preserve_dropped_tokens = True
     if enable_experimental_block_reclaim and after_required < before_required:
-        # Physical reclaim can still happen by truncating tail blocks after
-        # compaction. We intentionally keep the stable, order-preserving
-        # permutation here because the fill-hole path can preserve the kept
-        # token set while silently scrambling prefix order across repeated
-        # compressions.
-        preserve_dropped_tokens = True
+        # Tail blocks are physically reclaimed immediately after compaction, so
+        # the dropped suffix never participates in attention again. Copy only
+        # the ordered kept prefix; this preserves the exact visible KV layout
+        # of the stable full permutation while avoiding a full [kept+dropped]
+        # rewrite on long prompts.
+        prefix_only_compaction = True
+        preserve_dropped_tokens = False
     if _DEBUG_FORCE_PRESERVE_DROPPED:
+        prefix_only_compaction = False
         preserve_dropped_tokens = True
 
     if keep_plan.mode == "per_head":
         per_head_fn = per_head_compact_fn or compact_request_kv_in_place_per_head
-        cache_len_after = per_head_fn(
-            kv_cache=kv_cache,
-            block_ids=block_ids,
-            block_size=block_size,
-            keep_token_indices_per_head=keep_plan.indices,
-            total_tokens=total_tokens,
-            preserve_dropped_tokens=preserve_dropped_tokens,
-        )
+        kwargs = {
+            "kv_cache": kv_cache,
+            "block_ids": block_ids,
+            "block_size": block_size,
+            "keep_token_indices_per_head": keep_plan.indices,
+            "total_tokens": total_tokens,
+            "preserve_dropped_tokens": preserve_dropped_tokens,
+        }
+        if prefix_only_compaction:
+            try:
+                cache_len_after = per_head_fn(**kwargs, prefix_only=True)
+            except TypeError as exc:
+                if "prefix_only" not in str(exc):
+                    raise
+                kwargs["preserve_dropped_tokens"] = True
+                cache_len_after = per_head_fn(**kwargs)
+        else:
+            cache_len_after = per_head_fn(**kwargs)
     else:
         shared_fn = shared_compact_fn or compact_request_kv_in_place
-        cache_len_after = shared_fn(
-            kv_cache=kv_cache,
-            block_ids=block_ids,
-            block_size=block_size,
-            keep_token_indices=keep_plan.indices,
-            total_tokens=total_tokens,
-            preserve_dropped_tokens=preserve_dropped_tokens,
-        )
+        kwargs = {
+            "kv_cache": kv_cache,
+            "block_ids": block_ids,
+            "block_size": block_size,
+            "keep_token_indices": keep_plan.indices,
+            "total_tokens": total_tokens,
+            "preserve_dropped_tokens": preserve_dropped_tokens,
+        }
+        if prefix_only_compaction:
+            try:
+                cache_len_after = shared_fn(**kwargs, prefix_only=True)
+            except TypeError as exc:
+                if "prefix_only" not in str(exc):
+                    raise
+                kwargs["preserve_dropped_tokens"] = True
+                cache_len_after = shared_fn(**kwargs)
+        else:
+            cache_len_after = shared_fn(**kwargs)
 
     return LayerCompactionResult(
         cache_len_after=int(cache_len_after),

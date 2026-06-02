@@ -27,6 +27,7 @@ from .thresholds import is_ascend_environment_available
 from .worker import (
     TriAttentionWorker,
     _debug_early_install_proxy_enabled,
+    _should_early_install_proxy,
     should_install_triattention_runner_proxy,
 )
 
@@ -235,8 +236,15 @@ def _install_triattention_runner_proxy_state(self) -> None:
     # Reuse TriAttentionWorker lazy-injection fields on native Worker instance.
     self._triattention_runtime_config = TriAttentionRuntimeConfig.from_env()
     self._triattention_runner_proxy_installed = False
-    if _debug_early_install_proxy_enabled():
-        TriAttentionWorker._ensure_triattention_runner_proxy(self)
+    if _debug_early_install_proxy_enabled() or _should_early_install_proxy(
+        self,
+        self._triattention_runtime_config,
+    ):
+        self._triattention_installing_during_init = True
+        try:
+            TriAttentionWorker._ensure_triattention_runner_proxy(self)
+        finally:
+            self._triattention_installing_during_init = False
         logger.debug("TriAttention: eagerly installed runner proxy during worker init_device")
 
 

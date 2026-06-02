@@ -47,6 +47,7 @@ export TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=1
 export TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=1
 export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
 export TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND=0
+export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -117,21 +118,24 @@ the full prompt length.
 
 ## Performance Tuning
 
-The default selector scores every layer to preserve the closest behavior to the
-reference algorithm. On Ascend this one-time scoring cost can dominate short or
-medium generations. For latency-sensitive serving, start with:
+On Ascend, the runtime keeps sparse-stat per-head selection for long-context
+quality, but caps scoring to a uniform layer sample by default. This keeps the
+visible KV layout aligned with the reference path while avoiding all-layer
+scoring overhead. For latency-sensitive serving, start with:
 
 ```bash
-export TRIATTN_RUNTIME_SCORE_MAX_LAYERS=8
+export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
 export TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND=8
 export TRIATTN_RUNTIME_SPARSE_NORMALIZE_SCORES=0
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 ```
 
-`TRIATTN_RUNTIME_SCORE_MAX_LAYERS` uniformly samples the scoring layers before
-cross-layer aggregation. Use `8` as the conservative first setting, then try `4`
-if quality is stable. The runtime log will include
+`TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` is used only when
+`TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set `SCORE_MAX_LAYERS` explicitly to force
+a value for every backend, or set the Ascend default to `0` to score all layers.
+Use `8` as the conservative first setting, then try `4` if quality is stable.
+The runtime log will include
 `selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
 
 `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` prevents very small compactions
