@@ -75,6 +75,20 @@ def test_packaged_stats_match_gpt_oss_model_hint(monkeypatch):
     assert config.sparse_stats_path.exists()
 
 
+def test_missing_env_stats_path_falls_back_to_packaged_stats(monkeypatch):
+    monkeypatch.setenv(
+        "TRIATTN_RUNTIME_SPARSE_STATS_PATH",
+        "/tmp/triattention-missing-stats.pt",
+    )
+    monkeypatch.delenv("TRIATTN_RUNTIME_MODEL_PATH", raising=False)
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.sparse_stats_path is not None
+    assert config.sparse_stats_path.name == "qwen3_32b_int4_stats.pt"
+    assert config.sparse_stats_path.exists()
+
+
 def test_explicit_fast_recency_with_stats_keeps_accuracy_guard(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_FAST_RECENCY_ONLY", "1")
     monkeypatch.setenv("TRIATTN_RUNTIME_SPARSE_STATS_PATH", "/tmp/triattention-stats.pt")

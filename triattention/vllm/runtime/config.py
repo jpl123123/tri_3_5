@@ -153,6 +153,22 @@ class TriAttentionRuntimeConfig:
                 else None
             )
         )
+        sparse_stats_path_candidate = (
+            Path(sparse_stats_path_effective)
+            if sparse_stats_path_effective
+            else None
+        )
+        if sparse_stats_path_candidate is not None:
+            try:
+                stats_path_exists = sparse_stats_path_candidate.expanduser().exists()
+            except (OSError, RuntimeError, ValueError):
+                stats_path_exists = False
+            if not stats_path_exists:
+                fallback_sparse_stats_path = _resolve_packaged_sparse_stats_path(
+                    model_path_raw
+                )
+                if fallback_sparse_stats_path is not None:
+                    sparse_stats_path_candidate = fallback_sparse_stats_path
         logging_enabled = maybe_bool("LOGGING", cls.logging_enabled)
         log_decisions = maybe_bool("LOG_DECISIONS", cls.log_decisions)
         log_execution_path = maybe_bool(
@@ -310,11 +326,7 @@ class TriAttentionRuntimeConfig:
                 "PREINSTALL_INPUT_PATCH",
                 cls.preinstall_input_patch,
             ),
-            sparse_stats_path=(
-                Path(sparse_stats_path_effective)
-                if sparse_stats_path_effective
-                else None
-            ),
+            sparse_stats_path=sparse_stats_path_candidate,
             model_path=Path(model_path_raw) if model_path_raw else None,
             pruning_mode=maybe_str("PRUNING_MODE", cls.pruning_mode) or cls.pruning_mode,
             sparse_score_aggregation=(
