@@ -35,6 +35,7 @@ from .phase_profile import (
     phase_now,
     phase_profile_enabled,
     record_phase,
+    register_model_probes,
 )
 from .signals import CompressionSignal
 from .state import RequestStateStore
@@ -380,6 +381,7 @@ class TriAttentionModelRunner:
                 )
 
         if installed and bool(getattr(self._perf, "enabled", False)):
+            register_model_probes(installed)
             self._logger.info(
                 "TriAttention installed model submodule phase probes: %s",
                 ",".join(installed),

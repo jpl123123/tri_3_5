@@ -61,6 +61,37 @@ def test_auto_fast_recency_keeps_documented_decode_reclaim_interval():
     assert config.min_reclaim_blocks_on_ascend == 8
 
 
+def test_auto_fast_recency_bounds_ascend_score_layers():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=True,
+        fast_recency_accuracy_guard=False,
+        auto_fast_recency_on_ascend=True,
+    )
+
+    apply_ascend_fast_recency_defaults(config, env={})
+
+    assert config.score_max_layers == 8
+    assert config.score_max_layers_on_ascend == 8
+
+
+def test_auto_fast_recency_respects_explicit_score_layer_env():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=True,
+        fast_recency_accuracy_guard=False,
+        auto_fast_recency_on_ascend=True,
+        score_max_layers=4,
+        score_max_layers_on_ascend=4,
+    )
+
+    apply_ascend_fast_recency_defaults(
+        config,
+        env={"TRIATTN_RUNTIME_SCORE_MAX_LAYERS": "4"},
+    )
+
+    assert config.score_max_layers == 4
+    assert config.score_max_layers_on_ascend == 4
+
+
 def test_auto_fast_recency_overrides_stale_reclaim_interval():
     config = TriAttentionRuntimeConfig(
         fast_recency_only=True,

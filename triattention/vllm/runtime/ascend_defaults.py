@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from .config import TriAttentionRuntimeConfig
 
 _AUTO_FAST_RECENCY_MIN_RECLAIM_BLOCKS_ON_ASCEND = 8
+_AUTO_FAST_RECENCY_SCORE_MAX_LAYERS_ON_ASCEND = 8
 
 
 def apply_ascend_fast_recency_defaults(
@@ -34,3 +35,16 @@ def apply_ascend_fast_recency_defaults(
         config.min_reclaim_blocks_on_ascend = (
             _AUTO_FAST_RECENCY_MIN_RECLAIM_BLOCKS_ON_ASCEND
         )
+        if (
+            env_map.get("TRIATTN_RUNTIME_SCORE_MAX_LAYERS") is None
+            and env_map.get("TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND") is None
+        ):
+            if int(getattr(config, "score_max_layers_on_ascend", 0) or 0) <= 0:
+                config.score_max_layers_on_ascend = (
+                    _AUTO_FAST_RECENCY_SCORE_MAX_LAYERS_ON_ASCEND
+                )
+            if int(getattr(config, "score_max_layers", 0) or 0) <= 0:
+                config.score_max_layers = max(
+                    1,
+                    int(config.score_max_layers_on_ascend),
+                )

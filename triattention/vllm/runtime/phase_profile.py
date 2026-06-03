@@ -97,6 +97,7 @@ class TriAttentionPhaseProfile:
     sink_dir: str | None = None
     total_calls: int = 0
     phases: dict[str, _PhaseStats] = field(default_factory=dict)
+    model_probe_labels: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "TriAttentionPhaseProfile":
@@ -126,6 +127,11 @@ class TriAttentionPhaseProfile:
         stats.record(elapsed_ms, details)
         if self.total_calls % self.log_every_calls == 0:
             self._log_summary()
+
+    def register_model_probes(self, labels: list[str] | tuple[str, ...]) -> None:
+        if not self.enabled:
+            return
+        self.model_probe_labels = tuple(labels)
 
     def _format_phase(self, item: tuple[str, _PhaseStats]) -> str:
         name, stats = item
@@ -186,6 +192,13 @@ class TriAttentionPhaseProfile:
             f"top_total={'|'.join(self._format_phase(item) for item in top_total)} "
             f"top_avg={'|'.join(self._format_phase(item) for item in top_avg)}"
         )
+        if self.model_probe_labels:
+            status = "active" if model_phases else "installed_no_records"
+            line = (
+                f"{line} model_probe_status={status},"
+                f"installed={len(self.model_probe_labels)},"
+                f"recorded={len(model_phases)}"
+            )
         if model_top_total:
             line = (
                 f"{line} model_top_total="
@@ -243,6 +256,10 @@ def record_phase(
     details: dict[str, Any] | None = None,
 ) -> None:
     get_phase_profile().record_phase(phase, elapsed_ms, details)
+
+
+def register_model_probes(labels: list[str] | tuple[str, ...]) -> None:
+    get_phase_profile().register_model_probes(labels)
 
 
 def _is_phase_timed(func: Any) -> bool:

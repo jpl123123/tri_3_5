@@ -143,6 +143,7 @@ class TriAttentionScheduler(Scheduler):
         self._prefill_lens: dict[str, int] = {}
         self._prefill_compression_counts: dict[str, int] = {}
         self._length_threshold_cache: dict[str, int] = {}
+        self._last_signal_log_steps: dict[str, int] = {}
         self._triattention_step = 0
 
         logger.info(
@@ -220,6 +221,8 @@ class TriAttentionScheduler(Scheduler):
             self._prefill_compression_counts = {}
         if getattr(self, "_length_threshold_cache", None) is None:
             self._length_threshold_cache = {}
+        if getattr(self, "_last_signal_log_steps", None) is None:
+            self._last_signal_log_steps = {}
         if getattr(self, "_triattention_step", None) is None:
             self._triattention_step = 0
 
@@ -248,6 +251,7 @@ class TriAttentionScheduler(Scheduler):
             self._prefill_lens.pop(req_id, None)
             self._prefill_compression_counts.pop(req_id, None)
             self._length_threshold_cache.pop(req_id, None)
+            self._last_signal_log_steps.pop(req_id, None)
             self._effective_len_tracker.remove_request(req_id)
 
         cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
@@ -262,6 +266,26 @@ class TriAttentionScheduler(Scheduler):
                 prefill_len = self._resolve_prefill_len(req_id)
                 self._prefill_lens[req_id] = prefill_len
                 self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+
+    def _signal_log_interval_steps(self) -> int:
+        cfg = self.triattention_config
+        block_size = max(1, int(getattr(self, "block_size", 1) or 1))
+        if _is_ascend_scheduler_instance(self):
+            min_blocks = int(getattr(cfg, "min_reclaim_blocks_on_ascend", 0) or 0)
+        else:
+            min_blocks = int(getattr(cfg, "min_reclaim_blocks", 0) or 0)
+        reclaim_interval = max(1, min_blocks) * block_size
+        return max(1, int(getattr(cfg, "divide_length", 1) or 1), reclaim_interval)
+
+    def _should_log_signal_trigger(self, req_id: str) -> bool:
+        self._ensure_runtime_fields()
+        last_step = self._last_signal_log_steps.get(req_id)
+        if last_step is not None:
+            elapsed = self._triattention_step - last_step
+            if elapsed < self._signal_log_interval_steps():
+                return False
+        self._last_signal_log_steps[req_id] = self._triattention_step
+        return True
 
     def _has_active_effective_len_overrides(self) -> bool:
         self._ensure_runtime_fields()
@@ -401,12 +425,13 @@ class TriAttentionScheduler(Scheduler):
                         if bool(self.triattention_config.log_decisions)
                         else logger.debug
                     )
-                    log_fn(
-                        "TriAttention signal triggered req=%s step=%d "
-                        "estimated_cache_len=%d reason=%s",
-                        req_id, self._triattention_step,
-                        estimated_cache_len, signal.reason,
-                    )
+                    if self._should_log_signal_trigger(req_id):
+                        log_fn(
+                            "TriAttention signal triggered req=%s step=%d "
+                            "estimated_cache_len=%d reason=%s",
+                            req_id, self._triattention_step,
+                            estimated_cache_len, signal.reason,
+                        )
                 signals[req_id] = signal
         return signals
 
@@ -539,6 +564,7 @@ class TriAttentionScheduler(Scheduler):
                 cache_len_after=cache_len_after,
                 num_computed_tokens=req.num_computed_tokens,
             )
+            self._last_signal_log_steps.pop(req_id, None)
 
             if not self.triattention_config.enable_experimental_block_reclaim:
                 continue

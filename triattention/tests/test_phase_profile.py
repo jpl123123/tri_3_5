@@ -70,6 +70,39 @@ def test_phase_profile_logs_model_submodule_top_phases():
     assert "model_top_avg=model_layer_forward[layer=0]:calls=1,avg=11.00" in line
 
 
+def test_phase_profile_reports_installed_model_probes_without_records():
+    logger = _Logger()
+    profile = TriAttentionPhaseProfile(
+        logger=logger,
+        enabled=True,
+        log_every_calls=1,
+    )
+
+    profile.register_model_probes(["layer[0].forward", "layer[0].mlp.forward"])
+    profile.record_phase("ascend_v1_model_forward", 30.0)
+
+    line = logger.lines[-1]
+    assert "model_probe_status=installed_no_records,installed=2,recorded=0" in line
+    assert "model_top_total=" not in line
+
+
+def test_phase_profile_reports_active_model_probes():
+    logger = _Logger()
+    profile = TriAttentionPhaseProfile(
+        logger=logger,
+        enabled=True,
+        log_every_calls=2,
+    )
+
+    profile.register_model_probes(["layer[0].forward"])
+    profile.record_phase("ascend_v1_model_forward", 30.0)
+    profile.record_phase("model_layer_forward[layer=0]", 11.0)
+
+    line = logger.lines[-1]
+    assert "model_probe_status=active,installed=1,recorded=1" in line
+    assert "model_top_total=model_layer_forward[layer=0]:calls=1,avg=11.00" in line
+
+
 def test_phase_profile_top_n_env(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_PHASE_PROFILE", "1")
     monkeypatch.setenv("TRIATTN_RUNTIME_PHASE_TOP_N", "17")
