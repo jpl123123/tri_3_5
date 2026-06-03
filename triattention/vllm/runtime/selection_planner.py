@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,11 @@ from .constants import TRITON_SCORING_REQUIRED_MARKER
 from .kv_compaction import build_keep_token_indices, gather_request_k_dense
 from .layout_engine import PreparedLayerCompaction
 from .plan_models import KeepPlan
+
+try:
+    from vllm.logger import logger as _runtime_logger
+except Exception:  # pragma: no cover - fallback for lightweight tests
+    _runtime_logger = logging.getLogger(__name__)
 
 _DEBUG_DISABLE_GROUP_SELECTOR = (
     os.environ.get("TRIATTN_RUNTIME_DEBUG_DISABLE_GROUP_SELECTOR", "0").strip().lower()
@@ -49,6 +55,23 @@ _SELECTOR_DEBUG_KEYS = {
     "debug_trig_enabled",
     "debug_normalize_scores",
 }
+
+
+def _core_trace_enabled(config: TriAttentionRuntimeConfig) -> bool:
+    return bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+    )
+
+
+def _core_trace(
+    config: TriAttentionRuntimeConfig,
+    message: str,
+    *args: Any,
+) -> None:
+    if not _core_trace_enabled(config):
+        return
+    _runtime_logger.info("TRIATTN_CORE_TRACE " + message, *args)
 
 
 def _extract_selector_debug(result: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -93,6 +116,23 @@ def _call_selector(
     if accepts_kwargs or "gid" in params:
         call_kwargs["gid"] = gid
     return fn(**call_kwargs)
+
+
+def _selector_result_mode(result: dict[str, Any] | None) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    mode = result.get("mode")
+    semantic = result.get("semantic")
+    if semantic is not None:
+        return f"{mode}:{semantic}"
+    return str(mode) if mode is not None else None
+
+
+def _safe_keep_count(keep_plan: KeepPlan) -> int:
+    try:
+        return int(keep_plan.keep_count())
+    except Exception:
+        return -1
 
 
 def _kv_cache_device(kv_cache: Any) -> torch.device:
@@ -189,6 +229,25 @@ def prepare_group_layer_compactions(
     prepared_layer_compactions: list[PreparedLayerCompaction] = []
     selection_mode = "fallback"
     selector_debug: dict[str, Any] | None = None
+    _core_trace(
+        config,
+        "enter prepare_group_layer_compactions req=%s gid=%d layers=%d "
+        "block_ids=%d block_size=%d total_tokens=%d budget_total=%d "
+        "prefill_len=%d round_start=%d pruning_mode=%s group_selector=%s "
+        "layer_selector=%s",
+        req_id,
+        int(gid),
+        len(layer_tensors),
+        len(normalized_block_ids),
+        int(block_size),
+        int(group_total_tokens),
+        int(group_budget_total),
+        int(group_prefill_len),
+        int(round_start),
+        str(getattr(config, "pruning_mode", "")),
+        select_keep_indices_for_group is not None,
+        select_keep_indices is not None,
+    )
 
     if (
         select_keep_indices_for_group is not None
@@ -196,6 +255,22 @@ def prepare_group_layer_compactions(
         and config.per_head_selection_semantics == "hf_aligned_global_per_head"
         and not _DEBUG_DISABLE_GROUP_SELECTOR
     ):
+        group_selector_backend = (
+            "paged"
+            if getattr(select_keep_indices_for_group, "_supports_paged_group", False)
+            else "dense"
+        )
+        _core_trace(
+            config,
+            "enter selector_keep_call req=%s gid=%d scope=group backend=%s "
+            "layers=%d total_tokens=%d budget_total=%d",
+            req_id,
+            int(gid),
+            group_selector_backend,
+            len(layer_tensors),
+            int(group_total_tokens),
+            int(group_budget_total),
+        )
         try:
             if strict_triton_required:
                 if not getattr(select_keep_indices_for_group, "_supports_paged_group", False):
@@ -260,7 +335,26 @@ def prepare_group_layer_compactions(
                         "budget_total": group_budget_total,
                     },
                 )
+            _core_trace(
+                config,
+                "exit selector_keep_call req=%s gid=%d scope=group backend=%s "
+                "selected=%s result_mode=%s",
+                req_id,
+                int(gid),
+                group_selector_backend,
+                selected_for_group is not None,
+                _selector_result_mode(selected_for_group),
+            )
         except Exception as exc:
+            _core_trace(
+                config,
+                "exit selector_keep_call req=%s gid=%d scope=group backend=%s "
+                "status=error error=%s",
+                req_id,
+                int(gid),
+                group_selector_backend,
+                type(exc).__name__,
+            )
             raise RuntimeError(
                 f"{TRITON_SCORING_REQUIRED_MARKER}:"
                 f"req={req_id}:gid={gid}:global_per_head:{type(exc).__name__}"
@@ -279,6 +373,20 @@ def prepare_group_layer_compactions(
 
         selected: dict[str, Any] | None = selected_for_group
         if selected is None and select_keep_indices is not None:
+            layer_selector_backend = (
+                "paged" if getattr(select_keep_indices, "_supports_paged", False) else "dense"
+            )
+            _core_trace(
+                config,
+                "enter selector_keep_call req=%s gid=%d scope=layer layer=%s "
+                "backend=%s total_tokens=%d budget_total=%d",
+                req_id,
+                int(gid),
+                layer_idx,
+                layer_selector_backend,
+                int(group_total_tokens),
+                int(group_budget_total),
+            )
             try:
                 if strict_triton_required:
                     if not getattr(select_keep_indices, "_supports_paged", False):
@@ -322,7 +430,28 @@ def prepare_group_layer_compactions(
                             "budget_total": group_budget_total,
                         },
                     )
+                _core_trace(
+                    config,
+                    "exit selector_keep_call req=%s gid=%d scope=layer layer=%s "
+                    "backend=%s selected=%s result_mode=%s",
+                    req_id,
+                    int(gid),
+                    layer_idx,
+                    layer_selector_backend,
+                    selected is not None,
+                    _selector_result_mode(selected),
+                )
             except Exception as exc:
+                _core_trace(
+                    config,
+                    "exit selector_keep_call req=%s gid=%d scope=layer layer=%s "
+                    "backend=%s status=error error=%s",
+                    req_id,
+                    int(gid),
+                    layer_idx,
+                    layer_selector_backend,
+                    type(exc).__name__,
+                )
                 raise RuntimeError(
                     f"{TRITON_SCORING_REQUIRED_MARKER}:"
                     f"req={req_id}:gid={gid}:layer={layer_idx}:"
@@ -331,6 +460,17 @@ def prepare_group_layer_compactions(
 
         selected_from_fallback = False
         if selected is None:
+            _core_trace(
+                config,
+                "enter fallback_keep_selection req=%s gid=%d layer=%s "
+                "total_tokens=%d budget=%d strict=%s",
+                req_id,
+                int(gid),
+                layer_idx,
+                int(group_total_tokens),
+                int(getattr(config, "kv_budget", 0)),
+                bool(strict_triton_required),
+            )
             keep_indices = build_keep_token_indices(
                 total_tokens=group_total_tokens,
                 kv_budget=config.kv_budget,
@@ -347,6 +487,14 @@ def prepare_group_layer_compactions(
                 )
             selected = {"mode": "shared", "indices": keep_indices}
             selected_from_fallback = True
+            _core_trace(
+                config,
+                "exit fallback_keep_selection req=%s gid=%d layer=%s "
+                "selected=True",
+                req_id,
+                int(gid),
+                layer_idx,
+            )
 
         keep_plan = KeepPlan.from_selector_result(selected)
         selector_debug = _extract_selector_debug(selected) or selector_debug
@@ -358,6 +506,18 @@ def prepare_group_layer_compactions(
             group_total_tokens=group_total_tokens,
         )
         selection_mode = "fallback" if selected_from_fallback else keep_plan.selection_mode_label
+        _core_trace(
+            config,
+            "prepared_layer_compaction req=%s gid=%d layer=%s keep_mode=%s "
+            "selection_mode=%s keep_count=%d fallback=%s",
+            req_id,
+            int(gid),
+            layer_idx,
+            keep_plan.mode,
+            selection_mode,
+            _safe_keep_count(keep_plan),
+            bool(selected_from_fallback),
+        )
         prepared_layer_compactions.append(
             PreparedLayerCompaction(
                 layer_idx=layer_idx,
@@ -367,8 +527,19 @@ def prepare_group_layer_compactions(
             )
         )
 
-    return PreparedGroupSelection(
+    result = PreparedGroupSelection(
         tasks=prepared_layer_compactions,
         selection_mode=str(selection_mode),
         selector_debug=selector_debug,
     )
+    _core_trace(
+        config,
+        "exit prepare_group_layer_compactions req=%s gid=%d tasks=%d "
+        "selection_mode=%s selector_debug=%s",
+        req_id,
+        int(gid),
+        len(result.tasks),
+        result.selection_mode,
+        result.selector_debug,
+    )
+    return result

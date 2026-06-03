@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -15,6 +16,11 @@ from .plan_models import PlacementPlan, ReclaimEvent, ReclaimGroup
 from .selection_planner import prepare_group_layer_compactions
 from .signals import CompressionSignal
 
+try:
+    from vllm.logger import logger as _runtime_logger
+except Exception:  # pragma: no cover - fallback for lightweight tests
+    _runtime_logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class GroupPipelineOutcome:
@@ -24,6 +30,23 @@ class GroupPipelineOutcome:
     mutable_block_ids_by_group: list[list[int] | None]
     reclaim_mode: str = "truncate_tail"
     selector_debug: dict[str, Any] | None = None
+
+
+def _core_trace_enabled(config: TriAttentionRuntimeConfig) -> bool:
+    return bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+    )
+
+
+def _core_trace(
+    config: TriAttentionRuntimeConfig,
+    message: str,
+    *args: Any,
+) -> None:
+    if not _core_trace_enabled(config):
+        return
+    _runtime_logger.info("TRIATTN_CORE_TRACE " + message, *args)
 
 
 def normalize_mutable_block_ids_by_group(
@@ -164,21 +187,78 @@ def run_group_compaction_pipeline(
     selection_mode = "fallback"
     block_reclaim_groups: list[ReclaimGroup] = []
     selector_debug_by_group: list[dict[str, Any]] = []
+    step = int(getattr(signal, "step", 0))
+    _core_trace(
+        config,
+        "enter run_group_compaction_pipeline req=%s step=%d groups=%d "
+        "group_tensor_groups=%d effective_tokens=%d budget_total=%d block_size=%d "
+        "num_computed_tokens=%d strict_triton_required=%s",
+        req_id,
+        step,
+        len(mutable_block_ids_by_group),
+        len(group_tensors),
+        int(effective_tokens),
+        int(budget_total),
+        int(block_size),
+        int(num_computed_tokens),
+        bool(strict_triton_required),
+    )
 
     for gid, normalized_block_ids in enumerate(mutable_block_ids_by_group):
         if not normalized_block_ids:
+            _core_trace(
+                config,
+                "skip run_group_compaction_pipeline_group req=%s step=%d gid=%d "
+                "reason=empty_block_ids",
+                req_id,
+                step,
+                int(gid),
+            )
             continue
         layer_tensors = group_tensors.get(gid)
         if not layer_tensors:
+            _core_trace(
+                config,
+                "skip run_group_compaction_pipeline_group req=%s step=%d gid=%d "
+                "reason=no_layer_tensors block_ids=%d",
+                req_id,
+                step,
+                int(gid),
+                len(normalized_block_ids),
+            )
             continue
         group_capacity_tokens = len(normalized_block_ids) * block_size
         group_total_tokens = min(effective_tokens, group_capacity_tokens)
         if group_total_tokens <= 0:
+            _core_trace(
+                config,
+                "skip run_group_compaction_pipeline_group req=%s step=%d gid=%d "
+                "reason=non_positive_tokens capacity_tokens=%d effective_tokens=%d",
+                req_id,
+                step,
+                int(gid),
+                int(group_capacity_tokens),
+                int(effective_tokens),
+            )
             continue
         group_prefill_len = min(int(signal.prefill_len), group_total_tokens)
         group_budget_total = min(budget_total, group_total_tokens)
         round_start = int(max(0, num_computed_tokens))
         group_cache_len_after: int | None = None
+        _core_trace(
+            config,
+            "enter prepare_group_layer_compactions req=%s step=%d gid=%d "
+            "layers=%d total_tokens=%d budget_total=%d prefill_len=%d "
+            "round_start=%d",
+            req_id,
+            step,
+            int(gid),
+            len(layer_tensors),
+            int(group_total_tokens),
+            int(group_budget_total),
+            int(group_prefill_len),
+            int(round_start),
+        )
         try:
             group_selection = prepare_group_layer_compactions(
                 req_id=req_id,
@@ -199,10 +279,56 @@ def run_group_compaction_pipeline(
             )
         except ValueError as exc:
             if str(exc) == "prefill_exceeds_budget":
+                _core_trace(
+                    config,
+                    "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+                    "status=error reason=prefill_exceeds_budget",
+                    req_id,
+                    step,
+                    int(gid),
+                )
+                _core_trace(
+                    config,
+                    "exit run_group_compaction_pipeline req=%s step=%d "
+                    "applied=False reason=prefill_exceeds_budget",
+                    req_id,
+                    step,
+                )
                 return {"applied": False, "reason": "prefill_exceeds_budget"}
+            _core_trace(
+                config,
+                "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+                "status=error error=%s",
+                req_id,
+                step,
+                int(gid),
+                type(exc).__name__,
+            )
+            raise
+        except Exception as exc:
+            _core_trace(
+                config,
+                "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+                "status=error error=%s",
+                req_id,
+                step,
+                int(gid),
+                type(exc).__name__,
+            )
             raise
         prepared_layer_compactions = group_selection.tasks
         selection_mode = group_selection.selection_mode
+        _core_trace(
+            config,
+            "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+            "tasks=%d selection_mode=%s selector_debug=%s",
+            req_id,
+            step,
+            int(gid),
+            len(prepared_layer_compactions),
+            group_selection.selection_mode,
+            group_selection.selector_debug,
+        )
         selector_debug_by_group.append(
             {
                 "gid": gid,
@@ -214,6 +340,19 @@ def run_group_compaction_pipeline(
             }
         )
 
+        _core_trace(
+            config,
+            "enter execute_group_compaction req=%s step=%d gid=%d tasks=%d "
+            "block_ids=%d total_tokens=%d block_reclaim=%s require_physical=%s",
+            req_id,
+            step,
+            int(gid),
+            len(prepared_layer_compactions),
+            len(normalized_block_ids),
+            int(group_total_tokens),
+            bool(config.enable_experimental_block_reclaim),
+            bool(config.require_physical_reclaim),
+        )
         try:
             group_outcome = execute_group_compaction(
                 req_id=req_id,
@@ -231,10 +370,41 @@ def run_group_compaction_pipeline(
             first_layer_idx = (
                 prepared_layer_compactions[0].layer_idx if prepared_layer_compactions else -1
             )
+            _core_trace(
+                config,
+                "exit execute_group_compaction req=%s step=%d gid=%d "
+                "status=error first_layer=%s error=%s",
+                req_id,
+                step,
+                int(gid),
+                first_layer_idx,
+                type(exc).__name__,
+            )
+            _core_trace(
+                config,
+                "exit run_group_compaction_pipeline req=%s step=%d "
+                "applied=False reason=compaction_failed:g%d:l%s:%s",
+                req_id,
+                step,
+                int(gid),
+                first_layer_idx,
+                type(exc).__name__,
+            )
             return {
                 "applied": False,
                 "reason": f"compaction_failed:g{gid}:l{first_layer_idx}:{type(exc).__name__}",
             }
+        _core_trace(
+            config,
+            "exit execute_group_compaction req=%s step=%d gid=%d "
+            "layer_results=%d kept_blocks=%d reclaim_group=%s",
+            req_id,
+            step,
+            int(gid),
+            len(group_outcome.layer_results),
+            len(group_outcome.kept_block_ids),
+            group_outcome.reclaim_group is not None,
+        )
 
         for layer_idx, layer_compaction in group_outcome.layer_results:
             layer_cache_len_after = int(layer_compaction.cache_len_after)
@@ -257,9 +427,16 @@ def run_group_compaction_pipeline(
                 block_reclaim_groups.append(group_outcome.reclaim_group)
 
     if not compacted_any_group or cache_len_after is None:
+        _core_trace(
+            config,
+            "exit run_group_compaction_pipeline req=%s step=%d "
+            "applied=False reason=no_compactable_groups",
+            req_id,
+            step,
+        )
         return {"applied": False, "reason": "no_compactable_groups"}
 
-    return GroupPipelineOutcome(
+    outcome = GroupPipelineOutcome(
         cache_len_after=int(cache_len_after),
         selection_mode=str(selection_mode),
         block_reclaim_groups=block_reclaim_groups,
@@ -269,6 +446,17 @@ def run_group_compaction_pipeline(
             "groups": selector_debug_by_group,
         },
     )
+    _core_trace(
+        config,
+        "exit run_group_compaction_pipeline req=%s step=%d applied=True "
+        "selection_mode=%s cache_len_after=%d reclaim_groups=%d",
+        req_id,
+        step,
+        outcome.selection_mode,
+        int(outcome.cache_len_after),
+        len(outcome.block_reclaim_groups),
+    )
+    return outcome
 
 
 def finalize_hook_placement_result(
