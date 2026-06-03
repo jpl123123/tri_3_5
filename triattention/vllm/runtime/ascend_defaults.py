@@ -7,7 +7,7 @@ from collections.abc import Mapping
 
 from .config import TriAttentionRuntimeConfig
 
-_AUTO_FAST_RECENCY_MIN_RECLAIM_BLOCKS_ON_ASCEND = 1
+_AUTO_FAST_RECENCY_MIN_RECLAIM_BLOCKS_ON_ASCEND = 8
 
 
 def apply_ascend_fast_recency_defaults(
@@ -26,9 +26,9 @@ def apply_ascend_fast_recency_defaults(
         # stats/scoring path and hurts decode throughput, so auto mode owns this
         # default unless the caller disables auto or fast-recency entirely.
         config.fast_recency_accuracy_guard = False
-        # Zero-copy recency compaction is cheap on Ascend, while letting decode
-        # drift by 8 blocks dilutes most of the attention-length reduction for
-        # 10k/1k latency tests. Auto mode owns this perf-critical default even
+        # Zero-copy recency compaction is cheap on Ascend, but very small
+        # decode-time reclaim windows add scheduler/worker churn without moving
+        # the model-forward bottleneck. Keep the documented Ascend default even
         # when a stale reclaim env is present; disable auto-fast-recency to keep
         # a custom interval.
         config.min_reclaim_blocks_on_ascend = (
