@@ -555,8 +555,9 @@ class TriAttentionModelRunner:
             "req=%s",
             "step=%d",
             "reason=%s",
+            "core_entered=%s",
         ]
-        values: list[Any] = [req_id, self._last_step, reason]
+        values: list[Any] = [req_id, self._last_step, reason, False]
         for key in sorted(fields):
             parts.append(f"{key}=%s")
             values.append(fields[key])
@@ -740,6 +741,7 @@ class TriAttentionModelRunner:
                     effective_kv=effective_kv,
                     from_blocks=kv_from_blocks,
                     guard_tokens=guard_tokens,
+                    hint="set_sparse_stats_path_or_disable_long_context_guard",
                     prefill_len=prefill_len,
                     scheduled=scheduled_tokens_i,
                     scheduler_had_signal=bool(existing),

@@ -160,11 +160,16 @@ TriAttention trigonometric scoring path is active.
 
 If no real compression boundary is reached because a safety guard suppresses
 the trigger, the runner emits `TRIATTN_EXEC_PATH runner_trigger_guard` with the
-reason and key lengths. For example, pure recency diagnostics with
+reason and key lengths. These are pre-core guard logs: `core_entered=False`
+means no `worker_hook_enter`, `group_pipeline_enter`, or
+`selector_scoring_enter` marker is expected for that skipped boundary. For
+example, pure recency diagnostics with
 `TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1`, no sparse stats accuracy guard, and the
 default long-context guard report `reason=fast_recency_long_context_guard`
 above `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` instead of
-entering `worker_hook_enter`.
+entering `worker_hook_enter`; the log hint points to either making sparse stats
+visible to the worker process or disabling the long-context guard for a pure
+recency diagnostic run.
 
 With `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1`, high-frequency
 `runner_execute_model_compression_boundary`, `runner_executor_enter`,
