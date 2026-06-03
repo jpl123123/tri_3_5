@@ -373,7 +373,8 @@ class TriAttentionScheduler(Scheduler):
                 effective_tokens=effective_tokens,
                 prefill_len=prefill_len,
             ):
-                self._log_long_context_guard_skip(
+                TriAttentionScheduler._log_long_context_guard_skip(
+                    self,
                     req_id=req_id,
                     effective_tokens=effective_tokens,
                     prefill_len=prefill_len,
@@ -473,7 +474,7 @@ class TriAttentionScheduler(Scheduler):
                         if bool(self.triattention_config.log_decisions)
                         else logger.debug
                     )
-                    if self._should_log_signal_trigger(req_id):
+                    if TriAttentionScheduler._should_log_signal_trigger(self, req_id):
                         log_fn(
                             "TriAttention signal triggered req=%s step=%d "
                             "estimated_cache_len=%d reason=%s",

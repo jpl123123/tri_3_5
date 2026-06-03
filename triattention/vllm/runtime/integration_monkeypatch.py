@@ -603,6 +603,15 @@ def install_vllm_integration_monkeypatches(
         Scheduler._compute_length_threshold = TriAttentionScheduler._compute_length_threshold
         Scheduler._ensure_runtime_fields = TriAttentionScheduler._ensure_runtime_fields
         Scheduler._sync_prefill_lens = TriAttentionScheduler._sync_prefill_lens
+        Scheduler._signal_log_interval_steps = (
+            TriAttentionScheduler._signal_log_interval_steps
+        )
+        Scheduler._should_log_signal_trigger = (
+            TriAttentionScheduler._should_log_signal_trigger
+        )
+        Scheduler._log_long_context_guard_skip = (
+            TriAttentionScheduler._log_long_context_guard_skip
+        )
         Scheduler._has_active_effective_len_overrides = (
             TriAttentionScheduler._has_active_effective_len_overrides
         )
