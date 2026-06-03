@@ -78,3 +78,16 @@ def test_fast_recency_guard_blocks_20k_when_sparse_stats_missing(tmp_path):
         effective_tokens=19789,
         prefill_len=19789,
     )
+
+
+def test_fast_recency_guard_defaults_off_to_allow_core_entry():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=True,
+        fast_recency_accuracy_guard=False,
+    )
+
+    assert not should_guard_fast_recency_long_context(
+        config=config,
+        effective_tokens=19789,
+        prefill_len=19789,
+    )

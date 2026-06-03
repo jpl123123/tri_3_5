@@ -148,3 +148,7 @@ def test_auto_fast_recency_can_be_disabled_to_keep_accuracy_guard():
 
 def test_early_install_proxy_on_ascend_defaults_to_eager():
     assert TriAttentionRuntimeConfig().early_install_proxy_on_ascend
+
+
+def test_fast_recency_long_context_guard_defaults_to_core_entry():
+    assert not TriAttentionRuntimeConfig().fast_recency_long_context_guard

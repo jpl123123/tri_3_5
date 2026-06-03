@@ -52,7 +52,7 @@ class TriAttentionRuntimeConfig:
     score_layer_stride: int = 1
     fast_recency_only: bool = False
     fast_recency_accuracy_guard: bool = True
-    fast_recency_long_context_guard: bool = True
+    fast_recency_long_context_guard: bool = False
     fast_recency_long_context_guard_tokens: int = 16384
     min_reclaim_blocks: int = 1
     min_reclaim_blocks_on_ascend: int = 8

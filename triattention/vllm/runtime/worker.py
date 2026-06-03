@@ -280,7 +280,7 @@ class TriAttentionWorker(VLLMGPUWorker):
                 int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
                 bool(getattr(config, "fast_recency_only", False)),
                 bool(getattr(config, "fast_recency_accuracy_guard", True)),
-                bool(getattr(config, "fast_recency_long_context_guard", True)),
+                bool(getattr(config, "fast_recency_long_context_guard", False)),
                 int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0),
                 bool(getattr(config, "auto_fast_recency_on_ascend", True)),
                 bool(getattr(config, "early_install_proxy_on_ascend", False)),

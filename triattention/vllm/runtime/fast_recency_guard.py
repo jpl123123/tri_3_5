@@ -36,7 +36,7 @@ def should_guard_fast_recency_long_context(
 ) -> bool:
     if not uses_pure_fast_recency(config):
         return False
-    if not bool(getattr(config, "fast_recency_long_context_guard", True)):
+    if not bool(getattr(config, "fast_recency_long_context_guard", False)):
         return False
     threshold = int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0)
     if threshold <= 0:

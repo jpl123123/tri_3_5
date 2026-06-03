@@ -165,11 +165,12 @@ means no `worker_hook_enter`, `group_pipeline_enter`, or
 `selector_scoring_enter` marker is expected for that skipped boundary. For
 example, pure recency diagnostics with
 `TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1`, no sparse stats accuracy guard, and the
-default long-context guard report `reason=fast_recency_long_context_guard`
-above `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` instead of
-entering `worker_hook_enter`; the log hint points to either making sparse stats
-visible to the worker process or disabling the long-context guard for a pure
-recency diagnostic run.
+explicitly enabled long-context guard report
+`reason=fast_recency_long_context_guard` above
+`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` instead of entering
+`worker_hook_enter`; the log hint points to either making sparse stats visible
+to the worker process or disabling the long-context guard for a pure recency
+diagnostic run.
 
 With `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1`, high-frequency
 `runner_execute_model_compression_boundary`, `runner_executor_enter`,
@@ -308,9 +309,10 @@ This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens when no
 configured and `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` is not explicitly
 set, long-context runs keep the accuracy guard enabled and use sparse-stat
 TriAttention selection instead of being blocked by the pure-recency long-context
-guard. To force a pure recency diagnostic on 20k+ prompts, set both
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=0` and
-`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD=0`.
+guard. The long-context guard defaults off so diagnostic runs still enter the
+runtime hook on 20k+ prompts; set
+`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD=1` only when you explicitly
+want to suppress pure-recency compression above the guard threshold.
 
 When `KV_BUDGET` is a multiple of `--block-size`, vLLM-Ascend uses a zero-copy
 tail block remap by default instead of copying KV tensors; the expected
