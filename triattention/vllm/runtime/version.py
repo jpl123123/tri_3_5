@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "ascend-model-submodule-profile-v20-20260603"
+RUNTIME_BUILD_ID = "ascend-core-stats-default-v21-20260603"
 
 
 def runtime_build_info() -> str:

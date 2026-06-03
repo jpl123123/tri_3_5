@@ -300,11 +300,11 @@ export TRIATTN_RUNTIME_PHASE_PROFILE=0
 | `TRIATTN_RUNTIME_PRUNING_MODE` | `per_head` | Token selection strategy (`per_head` or `per_layer_per_head`) |
 | `TRIATTN_RUNTIME_SCORING_BACKEND` | `auto` | Scoring backend (`auto`, `triton`, `torch`/`pytorch`); `auto` uses PyTorch/torch_npu on vLLM-Ascend |
 | `TRIATTN_RUNTIME_FAST_RECENCY_ONLY` | `false` | Diagnostic low-overhead selector that keeps the most recent budget tokens without sparse-stat scoring |
-| `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` | `true` | When an existing stats file is configured, prefer sparse TriAttention selection over pure recency for long-context correctness. If `FAST_RECENCY_ONLY=1` is explicitly set and stats are unset or missing, the runtime stays on pure-recency diagnostics. |
+| `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` | `true` | Prefer sparse TriAttention selection over pure recency for long-context correctness. When no stats path is set, the runtime uses packaged stats when available so core `group_pipeline_enter` / `selector_scoring_enter` markers are reached; explicitly missing stats paths still fall back to pure-recency diagnostics. |
 | `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD` | `false` | Optional safety gate for pure-recency diagnostics on very long prompts; defaults off so the vLLM-Ascend path still enters the TriAttention hook for validation |
 | `TRIATTN_RUNTIME_ENABLE_ZERO_COPY_RECENCY` | `true` | On vLLM-Ascend, use block-table tail remap for `FAST_RECENCY_ONLY` when the budget is block-aligned |
 | `TRIATTN_RUNTIME_ZERO_COPY_RECENCY_ONLY_ON_ASCEND` | `true` | On Ascend fast-recency runs, wait for zero-copy tail remap instead of falling back to copy-based recency compaction |
-| `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | -- | Path to precomputed frequency statistics `.pt` file |
+| `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | packaged stats when available | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
 | `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND` | `true` | On vLLM-Ascend, wait until full prompt prefill finishes before first KV compaction |
 | `TRIATTN_RUNTIME_SCORE_MAX_LAYERS` | `0` | Maximum number of layers to score before cross-layer aggregation (`0` means all layers unless the Ascend limit below is explicitly set) |

@@ -138,7 +138,7 @@ Installed TriAttention runtime worker patches for Ascend: vllm_ascend.worker.wor
 Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runner_v1.NPUModelRunner ...
 ```
 
-Recent builds also include `build=ascend-zero-copy-wait-v6-20260602` in the
+Recent builds also include `build=ascend-core-stats-default-v21-20260603` in the
 plugin, scheduler, and worker logs. If that build id is missing, the running
 container is still loading an older installed package or stale source path.
 If the `vllm_ascend.worker.worker.NPUWorker` patch line is absent, check for a
@@ -183,9 +183,7 @@ For sparse-stat accuracy runs on Ascend, this is the recommended minimum
 configuration:
 
 ```bash
-export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
 export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
-export TRIATTN_RUNTIME_SPARSE_STATS_PATH=/path/to/stats.pt
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
@@ -196,13 +194,16 @@ export TRIATTN_RUNTIME_E2E_PROFILE=0
 export TRIATTN_RUNTIME_PHASE_PROFILE=0
 ```
 
-With that configuration, `FAST_RECENCY_ONLY=1` no longer forces the
-Ascend zero-copy-only wait path when sparse stats and the accuracy guard are
-configured. After `worker_hook_enter`, the next core markers should be
-`group_pipeline_enter` and `selector_scoring_enter`. If a run still reports
-`zero_copy_recency_not_ready`, it is on the pure-recency path; confirm
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` and
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` are both visible to the worker process.
+With that configuration, the runtime prefers packaged sparse stats when no
+explicit `TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set. `FAST_RECENCY_ONLY=1` is
+no longer required for Ascend validation, and when it is set the accuracy guard
+still pulls the run back to sparse TriAttention selection if packaged or
+explicit stats are available. After `worker_hook_enter`, the next core markers
+should be `group_pipeline_enter` and `selector_scoring_enter`. If a run still
+reports `zero_copy_recency_not_ready`, it is on the pure-recency diagnostic
+path; confirm that `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` is visible to
+the worker process and that no explicit missing stats path overrides the
+packaged stats.
 
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression
@@ -298,19 +299,20 @@ sparse scoring cost. Keep it disabled if your target vLLM-Ascend build shows
 any quality regression.
 
 To isolate selector overhead from the NPU attention speedup, run one benchmark
-with the recency-only selector:
+with the recency-only selector and explicitly disable the sparse accuracy
+guard:
 
 ```bash
 export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
+export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=0
 ```
 
-This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens when no
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is configured. If sparse stats are
-configured and `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` is not explicitly
-set, long-context runs keep the accuracy guard enabled and use sparse-stat
-TriAttention selection instead of being blocked by the pure-recency long-context
-guard. The long-context guard defaults off so diagnostic runs still enter the
-runtime hook on 20k+ prompts; set
+This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. Without
+the explicit guard disable, packaged or explicit sparse stats keep the accuracy
+guard enabled and use sparse-stat TriAttention selection, which emits
+`group_pipeline_enter` and `selector_scoring_enter` instead of the recency-only
+zero-copy tail path. The long-context guard defaults off so diagnostic runs
+still enter the runtime hook on 20k+ prompts; set
 `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD=1` only when you explicitly
 want to suppress pure-recency compression above the guard threshold.
 
@@ -326,13 +328,12 @@ yet, the runtime skips that compression attempt and waits for the next
 zero-copy opportunity instead of falling back to `reclaim=truncate_tail`.
 
 For correctness on long prompts, keep
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` when
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` points to an existing stats file, so
-sparse-stat TriAttention selection is used instead of pure recency. If
-`FAST_RECENCY_ONLY=1` is set but the stats file is missing, the runtime stays on
-the pure-recency diagnostic path instead of failing during Ascend worker init.
-Pure recency is a performance diagnostic and can degrade quality on 20k+
-prompts.
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1`, so packaged or explicit sparse
+stats drive sparse-stat TriAttention selection instead of pure recency. If
+`FAST_RECENCY_ONLY=1` is set and an explicitly configured stats file is missing,
+the runtime stays on the pure-recency diagnostic path instead of failing during
+Ascend worker init. Pure recency is a performance diagnostic and can degrade
+quality on 20k+ prompts.
 
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for

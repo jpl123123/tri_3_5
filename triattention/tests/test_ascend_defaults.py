@@ -49,15 +49,30 @@ def test_auto_fast_recency_respects_accuracy_guard():
     assert config.fast_recency_accuracy_guard
 
 
-def test_explicit_fast_recency_from_env_defaults_guard_off(monkeypatch):
+def test_explicit_fast_recency_from_env_uses_packaged_stats(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_FAST_RECENCY_ONLY", "1")
     monkeypatch.delenv("TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_SPARSE_STATS_PATH", raising=False)
+    monkeypatch.delenv("TRIATTN_RUNTIME_MODEL_PATH", raising=False)
 
     config = TriAttentionRuntimeConfig.from_env()
 
     assert config.fast_recency_only
-    assert not config.fast_recency_accuracy_guard
+    assert config.fast_recency_accuracy_guard
+    assert config.sparse_stats_path is not None
+    assert config.sparse_stats_path.name == "qwen3_32b_int4_stats.pt"
+    assert config.sparse_stats_path.exists()
+
+
+def test_packaged_stats_match_gpt_oss_model_hint(monkeypatch):
+    monkeypatch.delenv("TRIATTN_RUNTIME_SPARSE_STATS_PATH", raising=False)
+    monkeypatch.setenv("TRIATTN_RUNTIME_MODEL_PATH", "/models/gpt-oss-120b")
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.sparse_stats_path is not None
+    assert config.sparse_stats_path.name == "gpt_oss_120b_stats.pt"
+    assert config.sparse_stats_path.exists()
 
 
 def test_explicit_fast_recency_with_stats_keeps_accuracy_guard(monkeypatch):

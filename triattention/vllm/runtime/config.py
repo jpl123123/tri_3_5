@@ -7,6 +7,34 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_DEFAULT_QWEN3_STATS = "qwen3_32b_int4_stats.pt"
+_DEFAULT_GPT_OSS_STATS = "gpt_oss_120b_stats.pt"
+
+
+def _packaged_stats_path(filename: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "stats" / filename
+
+
+def _resolve_packaged_sparse_stats_path(model_path_raw: str | None) -> Path | None:
+    model_hint = (model_path_raw or "").lower().replace("_", "-")
+    candidates: list[str] = []
+    if "gpt" in model_hint and "oss" in model_hint:
+        candidates.append(_DEFAULT_GPT_OSS_STATS)
+    if "qwen" in model_hint:
+        candidates.append(_DEFAULT_QWEN3_STATS)
+    candidates.extend([_DEFAULT_QWEN3_STATS, _DEFAULT_GPT_OSS_STATS])
+
+    seen: set[str] = set()
+    for filename in candidates:
+        if filename in seen:
+            continue
+        seen.add(filename)
+        path = _packaged_stats_path(filename)
+        if path.exists():
+            return path
+    return None
+
+
 def _parse_bool(raw: str) -> bool:
     value = raw.strip().lower()
     if value in {"1", "true", "yes", "on"}:
@@ -112,6 +140,19 @@ class TriAttentionRuntimeConfig:
 
         sparse_stats_path_raw = maybe_str("SPARSE_STATS_PATH", None)
         model_path_raw = maybe_str("MODEL_PATH", None)
+        packaged_sparse_stats_path = (
+            _resolve_packaged_sparse_stats_path(model_path_raw)
+            if sparse_stats_path_raw is None
+            else None
+        )
+        sparse_stats_path_effective = (
+            sparse_stats_path_raw
+            or (
+                str(packaged_sparse_stats_path)
+                if packaged_sparse_stats_path is not None
+                else None
+            )
+        )
         logging_enabled = maybe_bool("LOGGING", cls.logging_enabled)
         log_decisions = maybe_bool("LOG_DECISIONS", cls.log_decisions)
         log_execution_path = maybe_bool(
@@ -139,7 +180,7 @@ class TriAttentionRuntimeConfig:
             fast_recency_only
             and _get_raw("FAST_RECENCY_ONLY") is not None
             and _get_raw("FAST_RECENCY_ACCURACY_GUARD") is None
-            and sparse_stats_path_raw is None
+            and sparse_stats_path_effective is None
         ):
             fast_recency_accuracy_guard_default = False
 
@@ -269,7 +310,11 @@ class TriAttentionRuntimeConfig:
                 "PREINSTALL_INPUT_PATCH",
                 cls.preinstall_input_patch,
             ),
-            sparse_stats_path=Path(sparse_stats_path_raw) if sparse_stats_path_raw else None,
+            sparse_stats_path=(
+                Path(sparse_stats_path_effective)
+                if sparse_stats_path_effective
+                else None
+            ),
             model_path=Path(model_path_raw) if model_path_raw else None,
             pruning_mode=maybe_str("PRUNING_MODE", cls.pruning_mode) or cls.pruning_mode,
             sparse_score_aggregation=(
