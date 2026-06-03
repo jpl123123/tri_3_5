@@ -9,6 +9,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from .logging_control import runtime_profile_logging_enabled
+
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     raw = os.environ.get(name)
@@ -83,9 +85,15 @@ class TriAttentionPerfProfile:
         sink_dir = os.environ.get("TRIATTN_RUNTIME_PERF_SINK_DIR")
         return cls(
             logger=logger,
-            enabled=_env_enabled("TRIATTN_RUNTIME_PERF_PROFILE", "0"),
+            enabled=runtime_profile_logging_enabled(
+                "TRIATTN_RUNTIME_PERF_PROFILE",
+                "0",
+            ),
             log_every_steps=max(1, _env_int("TRIATTN_RUNTIME_PERF_LOG_EVERY", 200)),
-            e2e_enabled=_env_enabled("TRIATTN_RUNTIME_E2E_PROFILE", "0"),
+            e2e_enabled=runtime_profile_logging_enabled(
+                "TRIATTN_RUNTIME_E2E_PROFILE",
+                "0",
+            ),
             e2e_log_every_steps=max(
                 1,
                 _env_int(

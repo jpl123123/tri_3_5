@@ -37,6 +37,7 @@ class TriAttentionRuntimeConfig:
     enable_experimental_block_reclaim: bool = True
     require_triton_scoring: bool = True
     require_physical_reclaim: bool = True
+    logging_enabled: bool = True
     log_decisions: bool = True
     fail_on_effective_len_regression: bool = True
     effective_len_regression_ratio: float = 0.9
@@ -109,6 +110,15 @@ class TriAttentionRuntimeConfig:
 
         sparse_stats_path_raw = maybe_str("SPARSE_STATS_PATH", None)
         model_path_raw = maybe_str("MODEL_PATH", None)
+        logging_enabled = maybe_bool("LOGGING", cls.logging_enabled)
+        log_decisions = maybe_bool("LOG_DECISIONS", cls.log_decisions)
+        log_all_worker_events = maybe_bool(
+            "LOG_ALL_WORKER_EVENTS",
+            cls.log_all_worker_events,
+        )
+        if not logging_enabled:
+            log_decisions = False
+            log_all_worker_events = False
         fast_recency_only = maybe_bool("FAST_RECENCY_ONLY", cls.fast_recency_only)
         fast_recency_accuracy_guard_default = cls.fast_recency_accuracy_guard
         if (
@@ -146,7 +156,8 @@ class TriAttentionRuntimeConfig:
                 "REQUIRE_PHYSICAL_RECLAIM",
                 cls.require_physical_reclaim,
             ),
-            log_decisions=maybe_bool("LOG_DECISIONS", cls.log_decisions),
+            logging_enabled=logging_enabled,
+            log_decisions=log_decisions,
             fail_on_effective_len_regression=maybe_bool(
                 "FAIL_ON_EFFECTIVE_LEN_REGRESSION",
                 cls.fail_on_effective_len_regression,
@@ -212,10 +223,7 @@ class TriAttentionRuntimeConfig:
                 "PREFILL_MAX_COMPRESSIONS_ON_ASCEND",
                 cls.prefill_max_compressions_on_ascend,
             ),
-            log_all_worker_events=maybe_bool(
-                "LOG_ALL_WORKER_EVENTS",
-                cls.log_all_worker_events,
-            ),
+            log_all_worker_events=log_all_worker_events,
             enable_async_compression_boundary=maybe_bool(
                 "ENABLE_ASYNC_COMPRESSION_BOUNDARY",
                 cls.enable_async_compression_boundary,

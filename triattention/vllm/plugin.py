@@ -63,7 +63,10 @@ def register_triattention_backend():
     if not _truthy(os.environ.get("ENABLE_TRIATTENTION"), default=True):
         return
 
-    quiet = os.environ.get("TRIATTENTION_QUIET", "0") == "1"
+    quiet = (
+        os.environ.get("TRIATTENTION_QUIET", "0") == "1"
+        or not _truthy(os.environ.get("TRIATTN_RUNTIME_LOGGING"), default=True)
+    )
     interface_mode = os.environ.get("TRIATTENTION_INTERFACE", "runtime").strip().lower()
 
     if interface_mode in {"legacy", "legacy_custom", "v1", "custom"}:

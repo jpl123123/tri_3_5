@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 from vllm.logger import logger
 
+from .logging_control import runtime_logging_enabled
+
 _DEBUG_DISABLE_LOGGED = False
 
 
@@ -84,7 +86,7 @@ def apply_worker_block_reclaim_events(
         "yes",
         "on",
     }:
-        if not _DEBUG_DISABLE_LOGGED:
+        if not _DEBUG_DISABLE_LOGGED and runtime_logging_enabled():
             logger.info("TriAttention worker reclaim sync disabled by debug env")
             _DEBUG_DISABLE_LOGGED = True
         return
@@ -164,11 +166,12 @@ def apply_worker_block_reclaim_events(
                 block_ids_after = _block_ids_after(groups_by_gid.get(gid))
                 if block_ids_after is not None:
                     if _rewrite_table_row(table, req_index, block_ids_after):
-                        logger.debug(
-                            "TriAttention worker remap: req=%s gid=%d "
-                            "num_blocks %d -> %d",
-                            req_id, gid, current, len(block_ids_after),
-                        )
+                        if runtime_logging_enabled():
+                            logger.debug(
+                                "TriAttention worker remap: req=%s gid=%d "
+                                "num_blocks %d -> %d",
+                                req_id, gid, current, len(block_ids_after),
+                            )
                     else:
                         logger.warning(
                             "TriAttention worker remap failed: req=%s gid=%d "
@@ -178,11 +181,12 @@ def apply_worker_block_reclaim_events(
                     continue
             if current > required_blocks:
                 num_blocks_per_row[req_index] = required_blocks
-                logger.debug(
-                    "TriAttention worker reclaim: req=%s num_blocks %d -> %d "
-                    "(cache_len_after=%d block_size=%d)",
-                    req_id, current, required_blocks, cache_len_after, block_size,
-                )
+                if runtime_logging_enabled():
+                    logger.debug(
+                        "TriAttention worker reclaim: req=%s num_blocks %d -> %d "
+                        "(cache_len_after=%d block_size=%d)",
+                        req_id, current, required_blocks, cache_len_after, block_size,
+                    )
 
         # Also truncate req_state.block_ids (CPU-side block tracking).
         # In vLLM V1, per-request state lives in base_runner.requests dict.

@@ -90,9 +90,32 @@ Q statistics, RoPE frequencies, and frequency scales to `float32` before scoring
 The KV cache itself remains in the model dtype; only the transient scoring chunks
 are promoted.
 
+## Runtime Logging Controls
+
+Use one master switch for quiet performance runs:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=0
+```
+
+This suppresses TriAttention startup, scheduler/worker decision, compression
+event, and `TRIATTN_PERF` / `TRIATTN_E2E_PERF` / `TRIATTN_PHASE_PERF` profile
+logs. It overrides the detailed log/profile switches below. Error and safety
+warning logs are still emitted.
+
+For debugging, enable the master switch and only the streams needed for the run:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=1
+export TRIATTN_RUNTIME_LOG_DECISIONS=1
+export TRIATTN_RUNTIME_PERF_PROFILE=1
+export TRIATTN_RUNTIME_E2E_PROFILE=1
+export TRIATTN_RUNTIME_PHASE_PROFILE=1
+```
+
 ## Expected Logs
 
-At startup, look for these log lines:
+With `TRIATTN_RUNTIME_LOGGING=1`, look for these startup log lines:
 
 ```text
 [TriAttention] Runtime (V2) plugin activated: patch_scheduler=True patch_worker=True
@@ -138,7 +161,7 @@ export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 ```
 
 `TRIATTN_RUNTIME_PERF_PROFILE=1` keeps the low-overhead aggregated
-`TRIATTN_PERF` counters enabled. To localize end-to-end blocking time without
+`TRIATTN_PERF` counters enabled when `TRIATTN_RUNTIME_LOGGING=1`. To localize end-to-end blocking time without
 installing method wrappers, enable the E2E profiler:
 
 ```bash

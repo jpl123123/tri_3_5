@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from vllm.logger import logger
 
+from .logging_control import runtime_logging_enabled
+
 from . import input_patch_state as _patch_state
 from .input_patch_ascend_backend import (
     make_patched_ascend_v2_build_attn_metadata,
@@ -891,7 +893,7 @@ def install_runtime_input_patch_hooks() -> bool:
             patched_targets.append("vllm_ascend.worker.v2.block_table.AscendBlockTables")
 
     _PATCH_INSTALLED = _PATCH_INSTALLED or patched_any
-    if patched_targets:
+    if patched_targets and runtime_logging_enabled():
         logger.info(
             "Installed TriAttention runtime input patches: %s",
             ", ".join(patched_targets),

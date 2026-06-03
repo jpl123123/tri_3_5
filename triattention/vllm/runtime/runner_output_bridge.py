@@ -14,6 +14,7 @@ from vllm.logger import logger
 
 from .input_adapter import active_effective_input_overrides, prepare_effective_input_overrides
 from .input_patch_backend import assert_effective_overrides_consumed
+from .logging_control import runtime_logging_enabled
 from .phase_profile import (
     phase_elapsed_ms,
     phase_now,
@@ -184,10 +185,11 @@ def attach_execute_model_compression_events(
                 "triattention_compression_events",
                 pending_events,
             )
-            logger.debug(
-                "attach_events: output=None, attached %d events (%d applied) to scheduler_output (id=%d)",
-                len(pending_events), applied_count, id(scheduler_output),
-            )
+            if runtime_logging_enabled():
+                logger.debug(
+                    "attach_events: output=None, attached %d events (%d applied) to scheduler_output (id=%d)",
+                    len(pending_events), applied_count, id(scheduler_output),
+                )
             return output, []
         if pending_events:
             logger.warning(
@@ -197,7 +199,7 @@ def attach_execute_model_compression_events(
         return output, pending_events
     try:
         setattr(output, "triattention_compression_events", pending_events)
-        if applied_count > 0:
+        if applied_count > 0 and runtime_logging_enabled():
             logger.debug(
                 "attach_events: attached %d events (%d applied) to output type=%s",
                 len(pending_events), applied_count, type(output).__name__,

@@ -234,8 +234,11 @@ class TriAttentionModelRunner:
         self._logger = logger
         self._perf = TriAttentionPerfProfile.from_env(self._logger)
         self._log_worker_events = (
-            bool(self.config.log_all_worker_events)
-            or _resolve_tensor_parallel_rank(base_runner) == 0
+            bool(self.config.logging_enabled)
+            and (
+                bool(self.config.log_all_worker_events)
+                or _resolve_tensor_parallel_rank(base_runner) == 0
+            )
         )
         self._pending_compression_events: list[dict[str, Any]] = []
         self._strict_no_downgrade = bool(self.config.enable_experimental_kv_compaction)
@@ -308,7 +311,11 @@ class TriAttentionModelRunner:
                 installed.append("model.compute_logits")
             except Exception:
                 pass
-        if installed and bool(getattr(self._perf, "enabled", False)):
+        if (
+            installed
+            and bool(getattr(self._perf, "enabled", False))
+            and self.config.logging_enabled
+        ):
             self._logger.info(
                 "TriAttention installed base runner phase probes: %s",
                 ",".join(installed),
@@ -380,7 +387,11 @@ class TriAttentionModelRunner:
                     "mlp",
                 )
 
-        if installed and bool(getattr(self._perf, "enabled", False)):
+        if (
+            installed
+            and bool(getattr(self._perf, "enabled", False))
+            and self.config.logging_enabled
+        ):
             register_model_probes(installed)
             self._logger.info(
                 "TriAttention installed model submodule phase probes: %s",
@@ -572,12 +583,13 @@ class TriAttentionModelRunner:
                             reason="defer_prefill",
                             step=self._last_step,
                         )
-                    self._logger.debug(
-                        "TriAttention dropped chunked-prefill trigger: "
-                        "req=%s scheduled=%d",
-                        req_id,
-                        scheduled_tokens_i,
-                    )
+                    if self.config.log_decisions:
+                        self._logger.debug(
+                            "TriAttention dropped chunked-prefill trigger: "
+                            "req=%s scheduled=%d",
+                            req_id,
+                            scheduled_tokens_i,
+                        )
                 continue
             max_prefill_compressions = int(
                 getattr(self.config, "prefill_max_compressions_on_ascend", 1)
@@ -597,14 +609,15 @@ class TriAttentionModelRunner:
                             reason="prefill_compression_limit",
                             step=self._last_step,
                         )
-                    self._logger.debug(
-                        "TriAttention dropped prefill trigger after limit: "
-                        "req=%s scheduled=%d compression_count=%d limit=%d",
-                        req_id,
-                        scheduled_tokens_i,
-                        int(getattr(state, "compression_count", 0) or 0),
-                        max_prefill_compressions,
-                    )
+                    if self.config.log_decisions:
+                        self._logger.debug(
+                            "TriAttention dropped prefill trigger after limit: "
+                            "req=%s scheduled=%d compression_count=%d limit=%d",
+                            req_id,
+                            scheduled_tokens_i,
+                            int(getattr(state, "compression_count", 0) or 0),
+                            max_prefill_compressions,
+                        )
                 continue
             # Compute actual KV length on the Worker side.
             # kv_from_blocks: block table already includes current step's
@@ -650,24 +663,25 @@ class TriAttentionModelRunner:
                             reason="fast_recency_long_context_guard",
                             step=self._last_step,
                         )
-                    self._logger.debug(
-                        "TriAttention dropped long-context fast-recency "
-                        "trigger: req=%s effective_kv=%d prefill_len=%d "
-                        "guard_tokens=%d scheduled=%d from_blocks=%s",
-                        req_id,
-                        effective_kv,
-                        prefill_len,
-                        int(
-                            getattr(
-                                self.config,
-                                "fast_recency_long_context_guard_tokens",
-                                0,
-                            )
-                            or 0
-                        ),
-                        scheduled_tokens_i,
-                        kv_from_blocks,
-                    )
+                    if self.config.log_decisions:
+                        self._logger.debug(
+                            "TriAttention dropped long-context fast-recency "
+                            "trigger: req=%s effective_kv=%d prefill_len=%d "
+                            "guard_tokens=%d scheduled=%d from_blocks=%s",
+                            req_id,
+                            effective_kv,
+                            prefill_len,
+                            int(
+                                getattr(
+                                    self.config,
+                                    "fast_recency_long_context_guard_tokens",
+                                    0,
+                                )
+                                or 0
+                            ),
+                            scheduled_tokens_i,
+                            kv_from_blocks,
+                        )
                 continue
             if effective_kv < threshold:
                 if existing is not None and existing.should_compress:
@@ -678,13 +692,14 @@ class TriAttentionModelRunner:
                             reason="below_worker_threshold",
                             step=self._last_step,
                         )
-                    self._logger.debug(
-                        "TriAttention dropped stale scheduler trigger below "
-                        "worker threshold: req=%s actual_kv=%d effective_kv=%d "
-                        "threshold=%d scheduled=%d from_blocks=%s",
-                        req_id, actual_kv, effective_kv, threshold,
-                        scheduled_tokens, kv_from_blocks,
-                    )
+                    if self.config.log_decisions:
+                        self._logger.debug(
+                            "TriAttention dropped stale scheduler trigger below "
+                            "worker threshold: req=%s actual_kv=%d effective_kv=%d "
+                            "threshold=%d scheduled=%d from_blocks=%s",
+                            req_id, actual_kv, effective_kv, threshold,
+                            scheduled_tokens, kv_from_blocks,
+                        )
                 continue
             if (
                 existing is not None
@@ -692,14 +707,14 @@ class TriAttentionModelRunner:
                 and int(getattr(existing, "scheduled_tokens", 1)) <= 1
             ):
                 continue
-            log_fn = self._logger.info if self.config.log_decisions else self._logger.debug
-            log_fn(
-                "TriAttention worker self-trigger: req=%s actual_kv=%d "
-                "effective_kv=%d scheduled=%d threshold=%d "
-                "from_blocks=%s scheduler_had_signal=%s",
-                req_id, actual_kv, effective_kv, scheduled_tokens,
-                threshold, kv_from_blocks, bool(existing),
-            )
+            if self.config.log_decisions:
+                self._logger.info(
+                    "TriAttention worker self-trigger: req=%s actual_kv=%d "
+                    "effective_kv=%d scheduled=%d threshold=%d "
+                    "from_blocks=%s scheduler_had_signal=%s",
+                    req_id, actual_kv, effective_kv, scheduled_tokens,
+                    threshold, kv_from_blocks, bool(existing),
+                )
             signals[req_id] = CompressionSignal(
                 req_id=req_id,
                 should_compress=True,
@@ -728,6 +743,7 @@ class TriAttentionModelRunner:
             logger=self._logger,
             log_decisions=bool(self.config.log_decisions),
             log_worker_events=bool(self._log_worker_events),
+            logging_enabled=bool(self.config.logging_enabled),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:
@@ -805,11 +821,12 @@ class TriAttentionModelRunner:
                     for g in new_block_ids
                 )
                 new_block_ids_list[i] = trimmed
-                self._logger.debug(
-                    "TriAttention patched new_block_ids: req=%s "
-                    "current_blocks=%d max=%d new_trimmed=%d->%d",
-                    req_id, current, max_blocks, max_new, available,
-                )
+                if self.config.log_decisions:
+                    self._logger.debug(
+                        "TriAttention patched new_block_ids: req=%s "
+                        "current_blocks=%d max=%d new_trimmed=%d->%d",
+                        req_id, current, max_blocks, max_new, available,
+                    )
 
     def _needs_effective_input_overrides(self, scheduler_output: Any) -> bool:
         # Tighten scope to "current scheduled batch includes a compressed

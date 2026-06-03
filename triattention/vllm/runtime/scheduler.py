@@ -147,42 +147,43 @@ class TriAttentionScheduler(Scheduler):
         self._long_context_guard_logged: set[str] = set()
         self._triattention_step = 0
 
-        logger.info(
-            "TriAttentionScheduler initialized: budget=%d divide_length=%d "
-            "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
-            "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s "
-            "defer_prefill_on_ascend=%s score_max_layers=%d "
-            "score_max_layers_on_ascend=%d "
-            "prefill_min_reclaim_blocks_on_ascend=%d "
-            "prefill_max_compressions_on_ascend=%d "
-            "fast_recency_only=%s fast_recency_accuracy_guard=%s "
-            "fast_recency_long_context_guard=%s "
-            "fast_recency_long_context_guard_tokens=%d "
-            "auto_fast_recency_on_ascend=%s "
-            "early_install_proxy_on_ascend=%s "
-            "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
-            "build=%s",
-            self.triattention_config.kv_budget,
-            self.triattention_config.divide_length,
-            self.triattention_config.min_reclaim_blocks_on_ascend,
-            self.triattention_config.protect_prefill,
-            self.triattention_config.enable_kv_usage_trigger,
-            self.triattention_config.enable_experimental_block_reclaim,
-            self.triattention_config.defer_prefill_compression_on_ascend,
-            self.triattention_config.score_max_layers,
-            self.triattention_config.score_max_layers_on_ascend,
-            self.triattention_config.prefill_min_reclaim_blocks_on_ascend,
-            self.triattention_config.prefill_max_compressions_on_ascend,
-            self.triattention_config.fast_recency_only,
-            self.triattention_config.fast_recency_accuracy_guard,
-            self.triattention_config.fast_recency_long_context_guard,
-            self.triattention_config.fast_recency_long_context_guard_tokens,
-            self.triattention_config.auto_fast_recency_on_ascend,
-            self.triattention_config.early_install_proxy_on_ascend,
-            self.triattention_config.enable_zero_copy_recency,
-            self.triattention_config.zero_copy_recency_only_on_ascend,
-            RUNTIME_BUILD_ID,
-        )
+        if self.triattention_config.logging_enabled:
+            logger.info(
+                "TriAttentionScheduler initialized: budget=%d divide_length=%d "
+                "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
+                "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s "
+                "defer_prefill_on_ascend=%s score_max_layers=%d "
+                "score_max_layers_on_ascend=%d "
+                "prefill_min_reclaim_blocks_on_ascend=%d "
+                "prefill_max_compressions_on_ascend=%d "
+                "fast_recency_only=%s fast_recency_accuracy_guard=%s "
+                "fast_recency_long_context_guard=%s "
+                "fast_recency_long_context_guard_tokens=%d "
+                "auto_fast_recency_on_ascend=%s "
+                "early_install_proxy_on_ascend=%s "
+                "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
+                "build=%s",
+                self.triattention_config.kv_budget,
+                self.triattention_config.divide_length,
+                self.triattention_config.min_reclaim_blocks_on_ascend,
+                self.triattention_config.protect_prefill,
+                self.triattention_config.enable_kv_usage_trigger,
+                self.triattention_config.enable_experimental_block_reclaim,
+                self.triattention_config.defer_prefill_compression_on_ascend,
+                self.triattention_config.score_max_layers,
+                self.triattention_config.score_max_layers_on_ascend,
+                self.triattention_config.prefill_min_reclaim_blocks_on_ascend,
+                self.triattention_config.prefill_max_compressions_on_ascend,
+                self.triattention_config.fast_recency_only,
+                self.triattention_config.fast_recency_accuracy_guard,
+                self.triattention_config.fast_recency_long_context_guard,
+                self.triattention_config.fast_recency_long_context_guard_tokens,
+                self.triattention_config.auto_fast_recency_on_ascend,
+                self.triattention_config.early_install_proxy_on_ascend,
+                self.triattention_config.enable_zero_copy_recency,
+                self.triattention_config.zero_copy_recency_only_on_ascend,
+                RUNTIME_BUILD_ID,
+            )
 
     def _resolve_prefill_len(self, req_id: str) -> int:
         if req_id in self._prefill_lens:
@@ -300,6 +301,8 @@ class TriAttentionScheduler(Scheduler):
         scheduled_tokens: int,
     ) -> None:
         self._ensure_runtime_fields()
+        if not self.triattention_config.logging_enabled:
+            return
         if req_id in self._long_context_guard_logged:
             return
         self._long_context_guard_logged.add(req_id)
@@ -345,7 +348,11 @@ class TriAttentionScheduler(Scheduler):
         compression_disabled = bool(self.triattention_config.disable_compression)
         signals: dict[str, CompressionSignal] = {}
         scheduled_items = list(iter_scheduled_token_items(scheduler_output))
-        if not scheduled_items and self._triattention_step % 500 == 0:
+        if (
+            self.triattention_config.log_decisions
+            and not scheduled_items
+            and self._triattention_step % 500 == 0
+        ):
             raw = getattr(scheduler_output, "num_scheduled_tokens", "MISSING")
             logger.info(
                 "TriAttention _build_signals: no scheduled items step=%d "
@@ -437,14 +444,15 @@ class TriAttentionScheduler(Scheduler):
                             is_prefill_step=is_prefill_step,
                         )
                         self._length_threshold_cache[req_id] = threshold
-                        logger.info(
-                            "TriAttention threshold computed req=%s threshold=%d "
-                            "prefill_len=%d is_prefill_step=%s budget=%d divide_length=%d",
-                            req_id, threshold, prefill_len,
-                            is_prefill_step,
-                            self.triattention_config.kv_budget,
-                            self.triattention_config.divide_length,
-                        )
+                        if self.triattention_config.log_decisions:
+                            logger.info(
+                                "TriAttention threshold computed req=%s threshold=%d "
+                                "prefill_len=%d is_prefill_step=%s budget=%d divide_length=%d",
+                                req_id, threshold, prefill_len,
+                                is_prefill_step,
+                                self.triattention_config.kv_budget,
+                                self.triattention_config.divide_length,
+                            )
                     if estimated_cache_len < threshold:
                         continue
 
@@ -468,7 +476,7 @@ class TriAttentionScheduler(Scheduler):
             # 2) requests that have already been compressed and still need
             #    effective-length updates for runtime input overrides.
             if signal.should_compress or has_override:
-                if signal.should_compress:
+                if signal.should_compress and self.triattention_config.logging_enabled:
                     log_fn = (
                         logger.info
                         if bool(self.triattention_config.log_decisions)
@@ -564,16 +572,17 @@ class TriAttentionScheduler(Scheduler):
         block_size = int(getattr(self, "block_size", 1))
         if block_size <= 0:
             block_size = 1
-        logger.debug(
-            "TriAttention _apply_compression_events: kv_cache_manager=%s "
-            "coordinator=%s managers=%s block_size=%d reclaim_enabled=%s",
-            type(self.kv_cache_manager).__name__,
-            type(coordinator).__name__ if coordinator else None,
-            type(managers).__name__ if managers else None,
-            block_size,
-            getattr(self, "triattention_config", None)
-            and self.triattention_config.enable_experimental_block_reclaim,
-        )
+        if self.triattention_config.log_decisions:
+            logger.debug(
+                "TriAttention _apply_compression_events: kv_cache_manager=%s "
+                "coordinator=%s managers=%s block_size=%d reclaim_enabled=%s",
+                type(self.kv_cache_manager).__name__,
+                type(coordinator).__name__ if coordinator else None,
+                type(managers).__name__ if managers else None,
+                block_size,
+                getattr(self, "triattention_config", None)
+                and self.triattention_config.enable_experimental_block_reclaim,
+            )
 
         def _num_required_blocks(token_len: int) -> int:
             if token_len <= 0:
@@ -643,13 +652,14 @@ class TriAttentionScheduler(Scheduler):
                 if isinstance(block_reclaim, dict)
                 else None
             )
-            logger.debug(
-                "TriAttention block reclaim: req=%s required_blocks=%d "
-                "expected_shrink_gids=%s block_reclaim=%s groups=%s",
-                req_id, required_blocks, expected_shrink_gids,
-                type(block_reclaim).__name__ if block_reclaim else None,
-                bool(groups),
-            )
+            if self.triattention_config.log_decisions:
+                logger.debug(
+                    "TriAttention block reclaim: req=%s required_blocks=%d "
+                    "expected_shrink_gids=%s block_reclaim=%s groups=%s",
+                    req_id, required_blocks, expected_shrink_gids,
+                    type(block_reclaim).__name__ if block_reclaim else None,
+                    bool(groups),
+                )
             if not isinstance(groups, list):
                 # In V1 batch-queue mode, consecutive compression steps can
                 # race: the worker already truncated blocks in an earlier step
@@ -663,12 +673,13 @@ class TriAttentionScheduler(Scheduler):
                 # blocks from new ones — skip synthesis to avoid freeing
                 # blocks the worker is still using.
                 if _evt_scheduled > 1:
-                    logger.debug(
-                        "TriAttention block reclaim: skipping synthesized "
-                        "reclaim during prefill (no groups, "
-                        "scheduled_tokens=%d) req=%s",
-                        _evt_scheduled, req_id,
-                    )
+                    if self.triattention_config.log_decisions:
+                        logger.debug(
+                            "TriAttention block reclaim: skipping synthesized "
+                            "reclaim during prefill (no groups, "
+                            "scheduled_tokens=%d) req=%s",
+                            _evt_scheduled, req_id,
+                        )
                 elif expected_shrink_gids and isinstance(managers, (list, tuple)):
                     for gid in sorted(expected_shrink_gids):
                         manager = managers[gid]
@@ -810,12 +821,13 @@ class TriAttentionScheduler(Scheduler):
                         manager.num_cached_block[req_id], len(reassembled)
                     )
                 if removed_old_blocks:
-                    logger.debug(
-                        "TriAttention scheduler FREE_BLOCKS: req=%s gid=%d "
-                        "freed=%d kept=%d new=%d",
-                        req_id, gid, len(removed_old_blocks),
-                        len(kept_old_blocks), len(new_blocks_this_step),
-                    )
+                    if self.triattention_config.log_decisions:
+                        logger.debug(
+                            "TriAttention scheduler FREE_BLOCKS: req=%s gid=%d "
+                            "freed=%d kept=%d new=%d",
+                            req_id, gid, len(removed_old_blocks),
+                            len(kept_old_blocks), len(new_blocks_this_step),
+                        )
                     if _free_reclaimed_blocks(manager, removed_old_blocks):
                         reclaim_applied_any = True
 
@@ -844,12 +856,13 @@ class TriAttentionScheduler(Scheduler):
                     if _free_reclaimed_blocks(manager, removed_blocks):
                         reclaim_applied_any = True
             elif missing_gids and _evt_scheduled > 1:
-                logger.debug(
-                    "TriAttention block reclaim: skipping synthesized "
-                    "reclaim for missing gids %s during prefill "
-                    "(scheduled_tokens=%d) req=%s",
-                    sorted(missing_gids), _evt_scheduled, req_id,
-                )
+                if self.triattention_config.log_decisions:
+                    logger.debug(
+                        "TriAttention block reclaim: skipping synthesized "
+                        "reclaim for missing gids %s during prefill "
+                        "(scheduled_tokens=%d) req=%s",
+                        sorted(missing_gids), _evt_scheduled, req_id,
+                    )
 
             if reclaim_applied_any:
                 update_request_effective_kv_offset(

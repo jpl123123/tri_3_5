@@ -18,6 +18,7 @@ def execute_runner_compression_actions(
     logger: Any,
     log_decisions: bool,
     log_worker_events: bool = True,
+    logging_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
@@ -37,11 +38,12 @@ def execute_runner_compression_actions(
             compression_count = int(getattr(req_state, "compression_count", 0) or 0)
             sched_tokens = int(getattr(signal, "scheduled_tokens", 1))
             if compression_count > 0 and last_step >= 0 and signal.step - last_step <= 1 and sched_tokens <= 1:
-                logger.debug(
-                    "TriAttention compression skipped (batch-queue dedup) "
-                    "req=%s step=%d last_compression_step=%d",
-                    req_id, signal.step, last_step,
-                )
+                if log_decisions:
+                    logger.debug(
+                        "TriAttention compression skipped (batch-queue dedup) "
+                        "req=%s step=%d last_compression_step=%d",
+                        req_id, signal.step, last_step,
+                    )
                 if hasattr(state_store, "mark_compression_skipped"):
                     state_store.mark_compression_skipped(
                         req_id=req_id,
@@ -142,14 +144,22 @@ def execute_runner_compression_actions(
                 if isinstance(block_reclaim, dict)
                 else None
             )
-            log_fn = logger.info if log_worker_events else logger.debug
-            log_fn(
-                "TriAttention compression applied req=%s step=%d reason=%s "
-                "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
-                req_id, signal.step, result.reason,
-                before_len, cache_len_after, reclaimed_block_count,
-                selector_status, reclaim_mode,
-            )
+            if log_worker_events:
+                logger.info(
+                    "TriAttention compression applied req=%s step=%d reason=%s "
+                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
+                    req_id, signal.step, result.reason,
+                    before_len, cache_len_after, reclaimed_block_count,
+                    selector_status, reclaim_mode,
+                )
+            elif log_decisions:
+                logger.debug(
+                    "TriAttention compression applied req=%s step=%d reason=%s "
+                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
+                    req_id, signal.step, result.reason,
+                    before_len, cache_len_after, reclaimed_block_count,
+                    selector_status, reclaim_mode,
+                )
             # Resolve scheduler_nct for this request so state can record
             # the num_computed_tokens at compression time (used by
             # build_effective_sparse_overrides for stable delta).
@@ -234,15 +244,16 @@ def execute_runner_compression_actions(
             }
             else logger.info
         )
-        skip_logger(
-            "TriAttention compression skipped req=%s step=%d reason=%s "
-            "cache_len_after=%s details=%s",
-            req_id,
-            signal.step,
-            result.reason,
-            result.cache_len_after,
-            details,
-        )
+        if logging_enabled:
+            skip_logger(
+                "TriAttention compression skipped req=%s step=%d reason=%s "
+                "cache_len_after=%s details=%s",
+                req_id,
+                signal.step,
+                result.reason,
+                result.cache_len_after,
+                details,
+            )
         events.append(
             {
                 "req_id": req_id,

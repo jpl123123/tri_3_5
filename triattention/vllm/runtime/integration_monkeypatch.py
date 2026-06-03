@@ -21,6 +21,7 @@ from .kv_allocation_sync import (
     resolve_request_effective_num_computed,
 )
 from .input_patch_backend import install_runtime_input_patch
+from .logging_control import runtime_logging_enabled
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
 from .scheduler import TriAttentionScheduler
@@ -73,11 +74,12 @@ def _maybe_rewrite_v2_output_req_map(scheduler_output: Any, model_runner_output:
         setattr(model_runner_output, "req_ids", scheduled_req_ids)
     except Exception:
         pass
-    logger.info(
-        "TriAttention debug rewrote V2 output req map: scheduled_req_ids=%s original_output_req_ids_head=%s",
-        scheduled_req_ids,
-        output_req_ids[: min(4, len(output_req_ids))],
-    )
+    if runtime_logging_enabled():
+        logger.info(
+            "TriAttention debug rewrote V2 output req map: scheduled_req_ids=%s original_output_req_ids_head=%s",
+            scheduled_req_ids,
+            output_req_ids[: min(4, len(output_req_ids))],
+        )
 
 
 def _refresh_scheduler_stats_kv_usage(outputs: Any, kv_usage: float) -> None:
@@ -112,17 +114,18 @@ def _patched_scheduler_init(self, *args, **kwargs):
     self._last_signal_log_steps = {}
     self._long_context_guard_logged = set()
     self._triattention_step = 0
-    logger.info(
-        "TriAttention monkeypatched Scheduler initialized: budget=%d divide_length=%d "
-        "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
-        "disable_compression=%s kv_usage_trigger_enabled=%s",
-        cfg.kv_budget,
-        cfg.divide_length,
-        int(getattr(cfg, "min_reclaim_blocks_on_ascend", 0) or 0),
-        cfg.protect_prefill,
-        cfg.disable_compression,
-        cfg.enable_kv_usage_trigger,
-    )
+    if cfg.logging_enabled:
+        logger.info(
+            "TriAttention monkeypatched Scheduler initialized: budget=%d divide_length=%d "
+            "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
+            "disable_compression=%s kv_usage_trigger_enabled=%s",
+            cfg.kv_budget,
+            cfg.divide_length,
+            int(getattr(cfg, "min_reclaim_blocks_on_ascend", 0) or 0),
+            cfg.protect_prefill,
+            cfg.disable_compression,
+            cfg.enable_kv_usage_trigger,
+        )
 
 
 def _compute_max_chunk_for_compression(self, cfg: TriAttentionRuntimeConfig) -> int | None:
@@ -218,15 +221,12 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
             source = "scheduler_output"
     if compression_events:
         applied = [e for e in compression_events if e.get("status") == "applied"]
-        log_fn = (
-            logger.info
-            if applied and bool(getattr(cfg, "log_decisions", False))
-            else logger.debug
-        )
-        log_fn(
-            "TriAttention update_from_output: received %d events (%d applied) via %s",
-            len(compression_events), len(applied), source,
-        )
+        if cfg.logging_enabled:
+            log_fn = logger.info if applied and cfg.log_decisions else logger.debug
+            log_fn(
+                "TriAttention update_from_output: received %d events (%d applied) via %s",
+                len(compression_events), len(applied), source,
+            )
         TriAttentionScheduler._apply_compression_events(self, compression_events)
         _refresh_scheduler_stats_kv_usage(outputs, self.kv_cache_manager.usage)
 
@@ -256,7 +256,8 @@ def _install_triattention_runner_proxy_state(self) -> None:
             TriAttentionWorker._ensure_triattention_runner_proxy(self)
         finally:
             self._triattention_installing_during_init = False
-        logger.debug("TriAttention: eagerly installed runner proxy during worker init_device")
+        if bool(getattr(self._triattention_runtime_config, "log_decisions", False)):
+            logger.debug("TriAttention: eagerly installed runner proxy during worker init_device")
 
 
 def _patched_worker_init_device(self):
@@ -362,7 +363,7 @@ def _install_optional_ascend_worker_patches() -> None:
         except Exception:
             continue
 
-    if patched:
+    if patched and runtime_logging_enabled():
         logger.info(
             "Installed TriAttention runtime worker patches for Ascend: %s",
             ", ".join(patched),
@@ -495,9 +496,10 @@ def _patched_engine_core_step_with_batch_queue(self):
         boundary_current = _scheduler_output_has_compression_boundary(scheduler_output)
         if boundary_current:
             setattr(scheduler_output, "_triattention_force_boundary_sync", True)
-            logger.debug(
-                "TriAttention async boundary: delaying queue lookahead for compression batch"
-            )
+            if runtime_logging_enabled():
+                logger.debug(
+                    "TriAttention async boundary: delaying queue lookahead for compression batch"
+                )
         exec_future = self.model_executor.execute_model(
             scheduler_output, non_block=True
         )
@@ -589,7 +591,8 @@ def install_vllm_integration_monkeypatches(
 
         Worker = worker_mod.Worker
     except Exception:
-        logger.debug("TriAttention could not import vLLM GPU Worker", exc_info=True)
+        if runtime_logging_enabled():
+            logger.debug("TriAttention could not import vLLM GPU Worker", exc_info=True)
 
     if patch_scheduler:
         _ORIG_SCHED_INIT = Scheduler.__init__
@@ -669,9 +672,10 @@ def install_vllm_integration_monkeypatches(
                     )
 
             _kv_utils._check_enough_kv_cache_memory = _relaxed_legacy_check
-            logger.info(
-                "Relaxed legacy KV cache memory check for TriAttention compression"
-            )
+            if runtime_logging_enabled():
+                logger.info(
+                    "Relaxed legacy KV cache memory check for TriAttention compression"
+                )
 
         if _public_check is not None:
 
@@ -699,9 +703,10 @@ def install_vllm_integration_monkeypatches(
                 )
 
             _kv_utils.check_enough_kv_cache_memory = _relaxed_public_check
-            logger.info(
-                "Relaxed public KV cache memory check for TriAttention compression"
-            )
+            if runtime_logging_enabled():
+                logger.info(
+                    "Relaxed public KV cache memory check for TriAttention compression"
+                )
 
         if _legacy_check is None and _public_check is None:
             logger.warning("Could not find a KV cache memory check symbol to relax")
@@ -711,8 +716,9 @@ def install_vllm_integration_monkeypatches(
     _PATCHED_SCHEDULER_ACTIVE = bool(patch_scheduler)
     _PATCHED_WORKER_ACTIVE = bool(patch_worker)
     _PATCHED = True
-    logger.info(
-        "Installed TriAttention runtime monkeypatch integration: patch_scheduler=%s patch_worker=%s",
-        patch_scheduler,
-        patch_worker,
-    )
+    if runtime_logging_enabled():
+        logger.info(
+            "Installed TriAttention runtime monkeypatch integration: patch_scheduler=%s patch_worker=%s",
+            patch_scheduler,
+            patch_worker,
+        )

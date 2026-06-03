@@ -15,6 +15,8 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
+from .logging_control import runtime_profile_logging_enabled
+
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     raw = os.environ.get(name)
@@ -105,7 +107,10 @@ class TriAttentionPhaseProfile:
         default_phase_every = max(1, perf_log_every * 10)
         return cls(
             logger=_runtime_logger(),
-            enabled=_env_enabled("TRIATTN_RUNTIME_PHASE_PROFILE", "0"),
+            enabled=runtime_profile_logging_enabled(
+                "TRIATTN_RUNTIME_PHASE_PROFILE",
+                "0",
+            ),
             log_every_calls=max(
                 1,
                 _env_int("TRIATTN_RUNTIME_PHASE_LOG_EVERY", default_phase_every),

@@ -243,10 +243,39 @@ outputs = llm.generate(["Your prompt here"], SamplingParams(temperature=0.6, top
 print(outputs[0].outputs[0].text)
 ```
 
+### Runtime Logging
+
+For performance tests that should not emit TriAttention runtime or profile
+diagnostics, use the logging master switch:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=0
+```
+
+This suppresses TriAttention startup, scheduler/worker decision, compression
+event, and `TRIATTN_PERF` / `TRIATTN_E2E_PERF` / `TRIATTN_PHASE_PERF` profile
+logs. Error and safety warning logs are still emitted.
+
+For debugging, leave logging enabled and turn on only the streams you need:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=1
+export TRIATTN_RUNTIME_LOG_DECISIONS=1
+export TRIATTN_RUNTIME_PERF_PROFILE=1
+export TRIATTN_RUNTIME_E2E_PROFILE=1
+export TRIATTN_RUNTIME_PHASE_PROFILE=1
+```
+
 ### Configuration Reference
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
+| `TRIATTN_RUNTIME_LOGGING` | `true` | Master switch for TriAttention runtime/profile diagnostic logs; set `0` for quiet performance tests |
+| `TRIATTN_RUNTIME_LOG_DECISIONS` | `true` | Emit scheduler/worker compression decisions when logging is enabled |
+| `TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS` | `false` | Emit compression event logs on every worker instead of rank 0 only when logging is enabled |
+| `TRIATTN_RUNTIME_PERF_PROFILE` | `false` | Emit aggregated `TRIATTN_PERF` counters when logging is enabled |
+| `TRIATTN_RUNTIME_E2E_PROFILE` | `false` | Emit aggregated `TRIATTN_E2E_PERF` counters when logging is enabled |
+| `TRIATTN_RUNTIME_PHASE_PROFILE` | `false` | Emit deeper `TRIATTN_PHASE_PERF` timing counters when logging is enabled |
 | `TRIATTN_RUNTIME_KV_BUDGET` | `2048` | Maximum tokens retained in KV cache per request |
 | `TRIATTN_RUNTIME_DIVIDE_LENGTH` | `128` | Compression trigger interval (every N new tokens) |
 | `TRIATTN_RUNTIME_WINDOW_SIZE` | `128` | Recent tokens always preserved |

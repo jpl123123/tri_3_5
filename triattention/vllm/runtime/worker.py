@@ -230,7 +230,8 @@ class TriAttentionWorker(VLLMGPUWorker):
                 self._ensure_triattention_runner_proxy()
             finally:
                 self._triattention_installing_during_init = False
-            logger.debug("TriAttentionWorker: eagerly installed runner proxy during init_device")
+            if self._triattention_runtime_config.log_decisions:
+                logger.debug("TriAttentionWorker: eagerly installed runner proxy during init_device")
 
     def _ensure_triattention_runner_proxy(self) -> None:
         if getattr(self, "_triattention_runner_proxy_installed", False):
@@ -249,43 +250,44 @@ class TriAttentionWorker(VLLMGPUWorker):
             config=config,
         )
         self._triattention_runner_proxy_installed = True
-        logger.info(
-            "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
-            "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
-            "window_size=%s score_max_layers=%d score_layer_stride=%d "
-            "min_reclaim_blocks_on_ascend=%d "
-            "prefill_min_reclaim_blocks_on_ascend=%d "
-            "prefill_max_compressions_on_ascend=%d "
-            "fast_recency_only=%s fast_recency_accuracy_guard=%s "
-            "fast_recency_long_context_guard=%s "
-            "fast_recency_long_context_guard_tokens=%d "
-            "auto_fast_recency_on_ascend=%s "
-            "early_install_proxy_on_ascend=%s "
-            "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
-            "build=%s",
-            "eagerly" if installing_during_init else "lazily",
-            config.kv_budget,
-            config.divide_length,
-            "preinstalled" if config.preinstall_input_patch else "deferred",
-            str(config.sparse_stats_path) if config.sparse_stats_path is not None else None,
-            str(config.model_path) if config.model_path is not None else None,
-            config.protect_prefill,
-            config.window_size,
-            int(getattr(config, "score_max_layers", 0) or 0),
-            int(getattr(config, "score_layer_stride", 1) or 1),
-            int(getattr(config, "min_reclaim_blocks_on_ascend", 0) or 0),
-            int(getattr(config, "prefill_min_reclaim_blocks_on_ascend", 0) or 0),
-            int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
-            bool(getattr(config, "fast_recency_only", False)),
-            bool(getattr(config, "fast_recency_accuracy_guard", True)),
-            bool(getattr(config, "fast_recency_long_context_guard", True)),
-            int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0),
-            bool(getattr(config, "auto_fast_recency_on_ascend", True)),
-            bool(getattr(config, "early_install_proxy_on_ascend", False)),
-            bool(getattr(config, "enable_zero_copy_recency", True)),
-            bool(getattr(config, "zero_copy_recency_only_on_ascend", True)),
-            RUNTIME_BUILD_ID,
-        )
+        if config.logging_enabled:
+            logger.info(
+                "TriAttentionWorker %s injected runner proxy: budget=%d divide_length=%d "
+                "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
+                "window_size=%s score_max_layers=%d score_layer_stride=%d "
+                "min_reclaim_blocks_on_ascend=%d "
+                "prefill_min_reclaim_blocks_on_ascend=%d "
+                "prefill_max_compressions_on_ascend=%d "
+                "fast_recency_only=%s fast_recency_accuracy_guard=%s "
+                "fast_recency_long_context_guard=%s "
+                "fast_recency_long_context_guard_tokens=%d "
+                "auto_fast_recency_on_ascend=%s "
+                "early_install_proxy_on_ascend=%s "
+                "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
+                "build=%s",
+                "eagerly" if installing_during_init else "lazily",
+                config.kv_budget,
+                config.divide_length,
+                "preinstalled" if config.preinstall_input_patch else "deferred",
+                str(config.sparse_stats_path) if config.sparse_stats_path is not None else None,
+                str(config.model_path) if config.model_path is not None else None,
+                config.protect_prefill,
+                config.window_size,
+                int(getattr(config, "score_max_layers", 0) or 0),
+                int(getattr(config, "score_layer_stride", 1) or 1),
+                int(getattr(config, "min_reclaim_blocks_on_ascend", 0) or 0),
+                int(getattr(config, "prefill_min_reclaim_blocks_on_ascend", 0) or 0),
+                int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
+                bool(getattr(config, "fast_recency_only", False)),
+                bool(getattr(config, "fast_recency_accuracy_guard", True)),
+                bool(getattr(config, "fast_recency_long_context_guard", True)),
+                int(getattr(config, "fast_recency_long_context_guard_tokens", 0) or 0),
+                bool(getattr(config, "auto_fast_recency_on_ascend", True)),
+                bool(getattr(config, "early_install_proxy_on_ascend", False)),
+                bool(getattr(config, "enable_zero_copy_recency", True)),
+                bool(getattr(config, "zero_copy_recency_only_on_ascend", True)),
+                RUNTIME_BUILD_ID,
+            )
 
     def execute_model(self, scheduler_output):  # type: ignore[override]
         # Sparse scheduler signals are empty in the common pre-trigger path.
