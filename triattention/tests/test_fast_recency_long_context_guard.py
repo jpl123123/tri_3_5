@@ -47,6 +47,14 @@ def test_fast_recency_guard_blocks_20k_accuracy_risk():
     )
 
 
+def test_fast_recency_guard_allows_sparse_accuracy_guard():
+    assert not should_guard_fast_recency_long_context(
+        config=_config(fast_recency_accuracy_guard=True),
+        effective_tokens=19789,
+        prefill_len=19789,
+    )
+
+
 def test_fast_recency_guard_blocks_20k_even_without_sparse_stats():
     assert should_guard_fast_recency_long_context(
         config=_config(sparse_stats_path=None),

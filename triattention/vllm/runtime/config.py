@@ -131,6 +131,7 @@ class TriAttentionRuntimeConfig:
             fast_recency_only
             and _get_raw("FAST_RECENCY_ONLY") is not None
             and _get_raw("FAST_RECENCY_ACCURACY_GUARD") is None
+            and sparse_stats_path_raw is None
         ):
             fast_recency_accuracy_guard_default = False
 

@@ -146,10 +146,11 @@ TriAttention trigonometric scoring path is active.
 
 If no real compression boundary is reached because a safety guard suppresses
 the trigger, the runner emits `TRIATTN_EXEC_PATH runner_trigger_guard` with the
-reason and key lengths. For example, with `TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1`
-and the default long-context guard, prompts above
-`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` report
-`reason=fast_recency_long_context_guard` instead of entering `worker_hook_enter`.
+reason and key lengths. For example, pure recency diagnostics with
+`TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1`, no sparse stats accuracy guard, and the
+default long-context guard report `reason=fast_recency_long_context_guard`
+above `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` instead of
+entering `worker_hook_enter`.
 
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression
@@ -251,13 +252,14 @@ with the recency-only selector:
 export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
 ```
 
-This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens. If
-`TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1` is explicitly set and
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` is not set, the runtime treats
-the explicit fast-recency request as authoritative even when
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is configured. Set
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` to force sparse-stat selection
-instead.
+This skips sparse-stat scoring and keeps the newest `KV_BUDGET` tokens when no
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is configured. If sparse stats are
+configured and `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD` is not explicitly
+set, long-context runs keep the accuracy guard enabled and use sparse-stat
+TriAttention selection instead of being blocked by the pure-recency long-context
+guard. To force a pure recency diagnostic on 20k+ prompts, set both
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=0` and
+`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD=0`.
 
 When `KV_BUDGET` is a multiple of `--block-size`, vLLM-Ascend uses a zero-copy
 tail block remap by default instead of copying KV tensors; the expected
@@ -270,11 +272,11 @@ by default. If a prefill or decode step cannot safely remap the newest blocks
 yet, the runtime skips that compression attempt and waits for the next
 zero-copy opportunity instead of falling back to `reclaim=truncate_tail`.
 
-For correctness on long prompts, set
-`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` explicitly: when
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, sparse-stat TriAttention selection
-is used instead of pure recency. Pure recency is a performance diagnostic and
-can degrade quality on 20k+ prompts.
+For correctness on long prompts, keep
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` when
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, so sparse-stat TriAttention
+selection is used instead of pure recency. Pure recency is a performance
+diagnostic and can degrade quality on 20k+ prompts.
 
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for

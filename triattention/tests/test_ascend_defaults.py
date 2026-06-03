@@ -52,11 +52,23 @@ def test_auto_fast_recency_respects_accuracy_guard():
 def test_explicit_fast_recency_from_env_defaults_guard_off(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_FAST_RECENCY_ONLY", "1")
     monkeypatch.delenv("TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD", raising=False)
+    monkeypatch.delenv("TRIATTN_RUNTIME_SPARSE_STATS_PATH", raising=False)
 
     config = TriAttentionRuntimeConfig.from_env()
 
     assert config.fast_recency_only
     assert not config.fast_recency_accuracy_guard
+
+
+def test_explicit_fast_recency_with_stats_keeps_accuracy_guard(monkeypatch):
+    monkeypatch.setenv("TRIATTN_RUNTIME_FAST_RECENCY_ONLY", "1")
+    monkeypatch.setenv("TRIATTN_RUNTIME_SPARSE_STATS_PATH", "/tmp/triattention-stats.pt")
+    monkeypatch.delenv("TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD", raising=False)
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.fast_recency_only
+    assert config.fast_recency_accuracy_guard
 
 
 def test_auto_fast_recency_keeps_documented_decode_reclaim_interval():
