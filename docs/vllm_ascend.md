@@ -137,6 +137,17 @@ export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 ```
 
+`TRIATTN_RUNTIME_PERF_PROFILE=1` keeps the low-overhead aggregated
+`TRIATTN_PERF` counters enabled. Deeper per-phase runner and model probes are
+diagnostic-only and add Python wrapper overhead on the decode hot path, so they
+are now controlled separately. Enable them only while localizing a bottleneck:
+
+```bash
+export TRIATTN_RUNTIME_PHASE_PROFILE=1
+export TRIATTN_RUNTIME_PHASE_LOG_EVERY=500
+export TRIATTN_RUNTIME_MODEL_PHASE_PROBES=1
+```
+
 `TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` defaults to `0`, which means score
 all layers. It is used only when `TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set
 `SCORE_MAX_LAYERS` explicitly to force a value for every backend. Use `8` as

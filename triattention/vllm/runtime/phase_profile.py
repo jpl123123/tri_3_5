@@ -103,7 +103,7 @@ class TriAttentionPhaseProfile:
         default_phase_every = max(1, perf_log_every * 10)
         return cls(
             logger=_runtime_logger(),
-            enabled=_env_enabled("TRIATTN_RUNTIME_PERF_PROFILE", "0"),
+            enabled=_env_enabled("TRIATTN_RUNTIME_PHASE_PROFILE", "0"),
             log_every_calls=max(
                 1,
                 _env_int("TRIATTN_RUNTIME_PHASE_LOG_EVERY", default_phase_every),

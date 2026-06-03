@@ -261,6 +261,8 @@ class TriAttentionModelRunner:
     def _install_base_runner_phase_probes(self) -> None:
         """Attach fallback timing probes directly to the concrete runner instance."""
 
+        if not phase_profile_enabled():
+            return
         method_phases = {
             "_prepare_inputs": "base_runner_prepare_inputs",
             "prepare_inputs": "base_runner_prepare_inputs",
@@ -314,7 +316,7 @@ class TriAttentionModelRunner:
     def _install_model_submodule_phase_probes(self) -> None:
         """Attach sampled model/layer probes for Ascend forward bottleneck analysis."""
 
-        default_enabled = bool(getattr(self._perf, "enabled", False))
+        default_enabled = phase_profile_enabled()
         if not _env_bool("TRIATTN_RUNTIME_MODEL_PHASE_PROBES", default_enabled):
             return
         model = getattr(self._base_runner, "model", None)
