@@ -141,6 +141,13 @@ also emits `TRIATTN_EXEC_PATH` markers. Look for the sequence
 prints `backend=torch` on Ascend and `trig_enabled=True` when the sparse
 TriAttention trigonometric scoring path is active.
 
+If no real compression boundary is reached because a safety guard suppresses
+the trigger, the runner emits `TRIATTN_EXEC_PATH runner_trigger_guard` with the
+reason and key lengths. For example, with `TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1`
+and the default long-context guard, prompts above
+`TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` report
+`reason=fast_recency_long_context_guard` instead of entering `worker_hook_enter`.
+
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression
 should happen once the prompt has finished prefill and decode starts.

@@ -246,6 +246,7 @@ class TriAttentionModelRunner:
             getattr(self.config, "logging_enabled", True)
             and getattr(self.config, "log_execution_path", True)
         )
+        self._logged_execution_path_trigger_guards: set[tuple[str, str]] = set()
         self._runtime_input_patch_installed = False
         if bool(getattr(self.config, "preinstall_input_patch", True)):
             self._runtime_input_patch_installed = bool(install_runtime_input_patch())
@@ -532,6 +533,31 @@ class TriAttentionModelRunner:
             )
         return state
 
+    def _log_execution_path_trigger_guard(
+        self,
+        *,
+        req_id: str,
+        reason: str,
+        **fields: Any,
+    ) -> None:
+        if not self._log_execution_path:
+            return
+        key = (req_id, reason)
+        if key in self._logged_execution_path_trigger_guards:
+            return
+        self._logged_execution_path_trigger_guards.add(key)
+        parts = [
+            "TRIATTN_EXEC_PATH runner_trigger_guard",
+            "req=%s",
+            "step=%d",
+            "reason=%s",
+        ]
+        values: list[Any] = [req_id, self._last_step, reason]
+        for key in sorted(fields):
+            parts.append(f"{key}=%s")
+            values.append(fields[key])
+        self._logger.info(" ".join(parts), *values)
+
     def _supplement_worker_self_triggers(
         self,
         scheduler_output: Any,
@@ -594,6 +620,13 @@ class TriAttentionModelRunner:
                             req_id,
                             scheduled_tokens_i,
                         )
+                self._log_execution_path_trigger_guard(
+                    req_id=req_id,
+                    reason="defer_prefill",
+                    prefill_len=prefill_len,
+                    scheduled=scheduled_tokens_i,
+                    scheduler_had_signal=bool(existing),
+                )
                 continue
             max_prefill_compressions = int(
                 getattr(self.config, "prefill_max_compressions_on_ascend", 1)
@@ -622,6 +655,15 @@ class TriAttentionModelRunner:
                             int(getattr(state, "compression_count", 0) or 0),
                             max_prefill_compressions,
                         )
+                self._log_execution_path_trigger_guard(
+                    req_id=req_id,
+                    reason="prefill_compression_limit",
+                    compression_count=int(getattr(state, "compression_count", 0) or 0),
+                    limit=max_prefill_compressions,
+                    prefill_len=prefill_len,
+                    scheduled=scheduled_tokens_i,
+                    scheduler_had_signal=bool(existing),
+                )
                 continue
             # Compute actual KV length on the Worker side.
             # kv_from_blocks: block table already includes current step's
@@ -659,6 +701,14 @@ class TriAttentionModelRunner:
                 effective_tokens=effective_kv,
                 prefill_len=prefill_len,
             ):
+                guard_tokens = int(
+                    getattr(
+                        self.config,
+                        "fast_recency_long_context_guard_tokens",
+                        0,
+                    )
+                    or 0
+                )
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
                     if hasattr(self.state_store, "mark_compression_skipped"):
@@ -675,17 +725,22 @@ class TriAttentionModelRunner:
                             req_id,
                             effective_kv,
                             prefill_len,
-                            int(
-                                getattr(
-                                    self.config,
-                                    "fast_recency_long_context_guard_tokens",
-                                    0,
-                                )
-                                or 0
-                            ),
+                            guard_tokens,
                             scheduled_tokens_i,
                             kv_from_blocks,
                         )
+                self._log_execution_path_trigger_guard(
+                    req_id=req_id,
+                    reason="fast_recency_long_context_guard",
+                    actual_kv=actual_kv,
+                    effective_kv=effective_kv,
+                    from_blocks=kv_from_blocks,
+                    guard_tokens=guard_tokens,
+                    prefill_len=prefill_len,
+                    scheduled=scheduled_tokens_i,
+                    scheduler_had_signal=bool(existing),
+                    threshold=threshold,
+                )
                 continue
             if effective_kv < threshold:
                 if existing is not None and existing.should_compress:
@@ -704,6 +759,17 @@ class TriAttentionModelRunner:
                             req_id, actual_kv, effective_kv, threshold,
                             scheduled_tokens, kv_from_blocks,
                         )
+                    self._log_execution_path_trigger_guard(
+                        req_id=req_id,
+                        reason="below_worker_threshold",
+                        actual_kv=actual_kv,
+                        effective_kv=effective_kv,
+                        from_blocks=kv_from_blocks,
+                        prefill_len=prefill_len,
+                        scheduled=scheduled_tokens_i,
+                        scheduler_had_signal=True,
+                        threshold=threshold,
+                    )
                 continue
             if (
                 existing is not None
