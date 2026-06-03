@@ -320,9 +320,12 @@ zero-copy opportunity instead of falling back to `reclaim=truncate_tail`.
 
 For correctness on long prompts, keep
 `TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` when
-`TRIATTN_RUNTIME_SPARSE_STATS_PATH` is set, so sparse-stat TriAttention
-selection is used instead of pure recency. Pure recency is a performance
-diagnostic and can degrade quality on 20k+ prompts.
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` points to an existing stats file, so
+sparse-stat TriAttention selection is used instead of pure recency. If
+`FAST_RECENCY_ONLY=1` is set but the stats file is missing, the runtime stays on
+the pure-recency diagnostic path instead of failing during Ascend worker init.
+Pure recency is a performance diagnostic and can degrade quality on 20k+
+prompts.
 
 The async compression boundary is disabled by default because it can repeatedly
 block vLLM's batch-queue lookahead during generation. Re-enable it only for

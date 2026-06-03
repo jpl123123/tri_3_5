@@ -9,6 +9,7 @@ import torch
 
 from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
+from .fast_recency_guard import uses_pure_fast_recency
 from .layout_engine import execute_group_compaction, num_required_blocks
 from .plan_models import PlacementPlan, ReclaimEvent, ReclaimGroup
 from .selection_planner import prepare_group_layer_compactions
@@ -58,12 +59,7 @@ def try_build_recency_tail_block_remap(
     when the tail starts in the middle of a block, which is the price of keeping
     this path copy-free.
     """
-    if not bool(getattr(config, "fast_recency_only", False)):
-        return None
-    if (
-        bool(getattr(config, "fast_recency_accuracy_guard", True))
-        and getattr(config, "sparse_stats_path", None) is not None
-    ):
+    if not uses_pure_fast_recency(config):
         return None
     if not bool(getattr(config, "enable_zero_copy_recency", True)):
         return None

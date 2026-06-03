@@ -10,7 +10,9 @@ if "torch" not in sys.modules:
     )
 
 from triattention.vllm.runtime import hook_impl
+from triattention.vllm.runtime.constants import TRITON_SCORING_REQUIRED_MARKER
 from triattention.vllm.runtime.config import TriAttentionRuntimeConfig
+from triattention.vllm.runtime.selector_hf import build_triattention_selector
 from triattention.vllm.runtime.signals import CompressionSignal
 
 
@@ -67,12 +69,14 @@ def _patch_pipeline(monkeypatch, reason: str = "pipeline_reached"):
     return calls
 
 
-def test_sparse_stats_accuracy_guard_bypasses_ascend_zero_copy_wait(monkeypatch):
+def test_sparse_stats_accuracy_guard_bypasses_ascend_zero_copy_wait(monkeypatch, tmp_path):
     calls = _patch_pipeline(monkeypatch)
+    stats_path = tmp_path / "triattention-stats.pt"
+    stats_path.write_bytes(b"stats")
     config = TriAttentionRuntimeConfig(
         fast_recency_only=True,
         fast_recency_accuracy_guard=True,
-        sparse_stats_path=Path("/tmp/triattention-stats.pt"),
+        sparse_stats_path=stats_path,
         enable_experimental_kv_compaction=True,
         enable_experimental_block_reclaim=True,
         require_triton_scoring=False,
@@ -114,3 +118,38 @@ def test_pure_fast_recency_still_waits_for_ascend_zero_copy(monkeypatch):
 
     assert result["reason"] == "zero_copy_recency_not_ready"
     assert calls == []
+
+
+def test_fast_recency_missing_stats_path_stays_recency_selector(tmp_path):
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=True,
+        fast_recency_accuracy_guard=True,
+        sparse_stats_path=tmp_path / "missing-stats.pt",
+        enable_experimental_kv_compaction=True,
+        require_triton_scoring=True,
+    )
+
+    selector, group_selector, selector_status = build_triattention_selector(config)
+
+    assert selector is not None
+    assert group_selector is not None
+    assert selector_status == "enabled:recency_only"
+
+
+def test_strict_sparse_scoring_still_fails_when_stats_missing(tmp_path):
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=False,
+        sparse_stats_path=tmp_path / "missing-stats.pt",
+        enable_experimental_kv_compaction=True,
+        require_triton_scoring=True,
+    )
+
+    try:
+        build_triattention_selector(config)
+    except RuntimeError as exc:
+        assert (
+            f"{TRITON_SCORING_REQUIRED_MARKER}:stats_path_not_found"
+            in str(exc)
+        )
+    else:
+        raise AssertionError("missing sparse stats should still fail strict scoring")

@@ -11,6 +11,7 @@ import torch
 
 from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
+from .fast_recency_guard import has_available_sparse_stats
 from .kv_compaction import build_keep_token_indices, gather_request_k_dense_range
 
 try:
@@ -46,7 +47,7 @@ def build_triattention_selector(
     )
     recency_accuracy_guarded = (
         bool(getattr(config, "fast_recency_accuracy_guard", True))
-        and config.sparse_stats_path is not None
+        and has_available_sparse_stats(config)
     )
     if bool(getattr(config, "fast_recency_only", False)) and not recency_accuracy_guarded:
 
