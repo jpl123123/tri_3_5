@@ -127,6 +127,9 @@ Installed TriAttention runtime input patches: ... vllm_ascend.worker.model_runne
 Recent builds also include `build=ascend-zero-copy-wait-v6-20260602` in the
 plugin, scheduler, and worker logs. If that build id is missing, the running
 container is still loading an older installed package or stale source path.
+If the `vllm_ascend.worker.worker.NPUWorker` patch line is absent, check for a
+nearby warning about importing or patching `NPUWorker`; recent builds report
+that failure instead of silently relying on the upstream GPU worker patch.
 
 Compression events should report a status like `selector_status=enabled:torch:tp=1/2`
 when the first compression boundary is reached on NPU. The `tp=rank/size`

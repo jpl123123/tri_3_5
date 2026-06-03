@@ -276,6 +276,50 @@ def _patched_worker_execute_model(self, scheduler_output):
     return _ORIG_WORKER_EXECUTE_MODEL(self, scheduler_output)
 
 
+def _resolve_vllm_gpu_worker_class() -> type | None:
+    try:
+        import vllm.v1.worker.gpu_worker as worker_mod
+
+        return worker_mod.Worker
+    except Exception:
+        if runtime_logging_enabled():
+            logger.debug("TriAttention could not import vLLM GPU Worker", exc_info=True)
+        return None
+
+
+def _patch_vllm_gpu_worker_class_for_triattention(worker_cls: type | None) -> bool:
+    global _ORIG_WORKER_INIT_DEVICE, _ORIG_WORKER_EXECUTE_MODEL
+    if worker_cls is None:
+        return False
+    if _ORIG_WORKER_INIT_DEVICE is not None:
+        return False
+    init_device = getattr(worker_cls, "init_device", None)
+    execute_model = getattr(worker_cls, "execute_model", None)
+    if not callable(init_device) or not callable(execute_model):
+        if runtime_logging_enabled():
+            logger.warning(
+                "Could not install TriAttention runtime worker patches for vLLM: "
+                "%s.%s is missing init_device or execute_model",
+                getattr(worker_cls, "__module__", "<unknown>"),
+                getattr(worker_cls, "__name__", "<unknown>"),
+            )
+        return False
+    _ORIG_WORKER_INIT_DEVICE = init_device
+    _ORIG_WORKER_EXECUTE_MODEL = execute_model
+    worker_cls.init_device = _patched_worker_init_device
+    worker_cls.execute_model = _patched_worker_execute_model
+    worker_cls._ensure_triattention_runner_proxy = (
+        TriAttentionWorker._ensure_triattention_runner_proxy
+    )
+    if runtime_logging_enabled():
+        logger.info(
+            "Installed TriAttention runtime worker patches for vLLM: %s.%s",
+            getattr(worker_cls, "__module__", "<unknown>"),
+            getattr(worker_cls, "__name__", "<unknown>"),
+        )
+    return True
+
+
 def _resolve_original_ascend_worker_method(
     worker: Any,
     method_name: str,
@@ -337,13 +381,31 @@ def _install_optional_ascend_worker_patches() -> None:
     try:
         import vllm_ascend.worker.worker as ascend_worker_mod
 
+        worker_cls = ascend_worker_mod.NPUWorker
+        was_patched = worker_cls in _ORIG_ASCEND_WORKER_METHODS
         if _patch_worker_class_for_triattention(
-            ascend_worker_mod.NPUWorker,
+            worker_cls,
             patch_init=True,
             patch_execute=True,
         ):
             patched.append("vllm_ascend.worker.worker.NPUWorker")
+        elif not was_patched and runtime_logging_enabled():
+            logger.warning(
+                "Could not install TriAttention runtime worker patches for Ascend: "
+                "vllm_ascend.worker.worker.NPUWorker is missing init_device or execute_model"
+            )
     except Exception:
+        if runtime_logging_enabled():
+            log_fn = (
+                logger.warning
+                if is_ascend_environment_available()
+                else logger.debug
+            )
+            log_fn(
+                "Could not import vllm_ascend.worker.worker.NPUWorker for "
+                "TriAttention runtime worker patches",
+                exc_info=True,
+            )
         return
 
     optional_workers = (
@@ -368,6 +430,14 @@ def _install_optional_ascend_worker_patches() -> None:
             "Installed TriAttention runtime worker patches for Ascend: %s",
             ", ".join(patched),
         )
+
+
+def _install_worker_patches(worker_cls: type | None) -> None:
+    _patch_vllm_gpu_worker_class_for_triattention(worker_cls)
+    _install_optional_ascend_worker_patches()
+    cfg = TriAttentionRuntimeConfig.from_env()
+    if bool(getattr(cfg, "preinstall_input_patch", True)):
+        install_runtime_input_patch()
 
 
 def _patched_kv_cache_allocate_slots(
@@ -574,6 +644,8 @@ def install_vllm_integration_monkeypatches(
     global _ORIG_KVCACHE_ALLOCATE_SLOTS, _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE
     global _PATCHED_SCHEDULER_ACTIVE, _PATCHED_WORKER_ACTIVE
     if _PATCHED:
+        if patch_worker and not _PATCHED_WORKER_ACTIVE:
+            _install_worker_patches(_resolve_vllm_gpu_worker_class())
         _PATCHED_SCHEDULER_ACTIVE = _PATCHED_SCHEDULER_ACTIVE or bool(patch_scheduler)
         _PATCHED_WORKER_ACTIVE = _PATCHED_WORKER_ACTIVE or bool(patch_worker)
         return
@@ -585,14 +657,7 @@ def install_vllm_integration_monkeypatches(
     EngineCore = engine_core_mod.EngineCore
     Scheduler = sched_mod.Scheduler
     KVCacheManager = kv_cache_manager_mod.KVCacheManager
-    Worker = None
-    try:
-        import vllm.v1.worker.gpu_worker as worker_mod
-
-        Worker = worker_mod.Worker
-    except Exception:
-        if runtime_logging_enabled():
-            logger.debug("TriAttention could not import vLLM GPU Worker", exc_info=True)
+    Worker = _resolve_vllm_gpu_worker_class()
 
     if patch_scheduler:
         _ORIG_SCHED_INIT = Scheduler.__init__
@@ -629,18 +694,7 @@ def install_vllm_integration_monkeypatches(
         EngineCore.step_with_batch_queue = _patched_engine_core_step_with_batch_queue
 
     if patch_worker:
-        if Worker is not None:
-            _ORIG_WORKER_INIT_DEVICE = Worker.init_device
-            _ORIG_WORKER_EXECUTE_MODEL = Worker.execute_model
-            Worker.init_device = _patched_worker_init_device
-            Worker.execute_model = _patched_worker_execute_model
-            Worker._ensure_triattention_runner_proxy = (
-                TriAttentionWorker._ensure_triattention_runner_proxy
-            )
-        _install_optional_ascend_worker_patches()
-        cfg = TriAttentionRuntimeConfig.from_env()
-        if bool(getattr(cfg, "preinstall_input_patch", True)):
-            install_runtime_input_patch()
+        _install_worker_patches(Worker)
 
     # Relax the KV cache memory check: TriAttention compresses KV cache
     # during generation, so the physical blocks needed are less than what
