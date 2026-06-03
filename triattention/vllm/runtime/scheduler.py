@@ -144,6 +144,7 @@ class TriAttentionScheduler(Scheduler):
         self._prefill_compression_counts: dict[str, int] = {}
         self._length_threshold_cache: dict[str, int] = {}
         self._last_signal_log_steps: dict[str, int] = {}
+        self._long_context_guard_logged: set[str] = set()
         self._triattention_step = 0
 
         logger.info(
@@ -223,6 +224,8 @@ class TriAttentionScheduler(Scheduler):
             self._length_threshold_cache = {}
         if getattr(self, "_last_signal_log_steps", None) is None:
             self._last_signal_log_steps = {}
+        if getattr(self, "_long_context_guard_logged", None) is None:
+            self._long_context_guard_logged = set()
         if getattr(self, "_triattention_step", None) is None:
             self._triattention_step = 0
 
@@ -252,6 +255,7 @@ class TriAttentionScheduler(Scheduler):
             self._prefill_compression_counts.pop(req_id, None)
             self._length_threshold_cache.pop(req_id, None)
             self._last_signal_log_steps.pop(req_id, None)
+            self._long_context_guard_logged.discard(req_id)
             self._effective_len_tracker.remove_request(req_id)
 
         cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
@@ -286,6 +290,43 @@ class TriAttentionScheduler(Scheduler):
                 return False
         self._last_signal_log_steps[req_id] = self._triattention_step
         return True
+
+    def _log_long_context_guard_skip(
+        self,
+        *,
+        req_id: str,
+        effective_tokens: int,
+        prefill_len: int,
+        scheduled_tokens: int,
+    ) -> None:
+        self._ensure_runtime_fields()
+        if req_id in self._long_context_guard_logged:
+            return
+        self._long_context_guard_logged.add(req_id)
+        log_fn = (
+            logger.info
+            if bool(self.triattention_config.log_decisions)
+            else logger.debug
+        )
+        log_fn(
+            "TriAttention compression skipped req=%s "
+            "reason=fast_recency_long_context_guard effective_tokens=%d "
+            "prefill_len=%d scheduled_tokens=%d guard_tokens=%d "
+            "fast_recency_only=%s",
+            req_id,
+            effective_tokens,
+            prefill_len,
+            scheduled_tokens,
+            int(
+                getattr(
+                    self.triattention_config,
+                    "fast_recency_long_context_guard_tokens",
+                    0,
+                )
+                or 0
+            ),
+            bool(getattr(self.triattention_config, "fast_recency_only", False)),
+        )
 
     def _has_active_effective_len_overrides(self) -> bool:
         self._ensure_runtime_fields()
@@ -323,14 +364,21 @@ class TriAttentionScheduler(Scheduler):
                 prefill_len = self._resolve_prefill_len(req_id)
                 self._prefill_lens[req_id] = prefill_len
                 self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+            effective_tokens = max(
+                int(getattr(request, "num_computed_tokens", 0) or 0),
+                prefill_len,
+            )
             if should_guard_fast_recency_long_context(
                 config=self.triattention_config,
-                effective_tokens=max(
-                    int(getattr(request, "num_computed_tokens", 0) or 0),
-                    prefill_len,
-                ),
+                effective_tokens=effective_tokens,
                 prefill_len=prefill_len,
             ):
+                self._log_long_context_guard_skip(
+                    req_id=req_id,
+                    effective_tokens=effective_tokens,
+                    prefill_len=prefill_len,
+                    scheduled_tokens=scheduled_tokens_i,
+                )
                 continue
             if (
                 _should_defer_prefill_compression_for_scheduler(self)
@@ -837,5 +885,6 @@ class TriAttentionScheduler(Scheduler):
         for req_id in scheduler_output.finished_req_ids:
             self._prefill_lens.pop(req_id, None)
             self._prefill_compression_counts.pop(req_id, None)
+            self._long_context_guard_logged.discard(req_id)
             self._effective_len_tracker.remove_request(req_id)
         return outputs

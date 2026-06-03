@@ -110,6 +110,7 @@ def _patched_scheduler_init(self, *args, **kwargs):
     self._prefill_compression_counts = {}
     self._length_threshold_cache = {}
     self._last_signal_log_steps = {}
+    self._long_context_guard_logged = set()
     self._triattention_step = 0
     logger.info(
         "TriAttention monkeypatched Scheduler initialized: budget=%d divide_length=%d "
@@ -233,6 +234,7 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
         self._prefill_lens.pop(req_id, None)
         self._length_threshold_cache.pop(req_id, None)
         self._last_signal_log_steps.pop(req_id, None)
+        self._long_context_guard_logged.discard(req_id)
         self._effective_len_tracker.remove_request(req_id)
     return outputs
 
