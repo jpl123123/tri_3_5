@@ -161,8 +161,13 @@ blocking phase:
 ```bash
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_LOG_EVERY=500
+export TRIATTN_RUNTIME_PHASE_TOP_N=16
 export TRIATTN_RUNTIME_MODEL_PHASE_PROBES=1
 ```
+
+Phase logs include `model_top_total` and `model_top_avg` when model submodule
+probes are installed. Use those fields to distinguish a layer, attention, or
+MLP hotspot after `ascend_v1_model_forward` dominates the backend runner.
 
 `TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` defaults to `0`, which means score
 all layers. It is used only when `TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set

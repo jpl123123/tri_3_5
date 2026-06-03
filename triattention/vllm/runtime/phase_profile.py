@@ -93,6 +93,7 @@ class TriAttentionPhaseProfile:
     logger: Any
     enabled: bool = False
     log_every_calls: int = 200
+    top_n: int = 8
     sink_dir: str | None = None
     total_calls: int = 0
     phases: dict[str, _PhaseStats] = field(default_factory=dict)
@@ -108,6 +109,7 @@ class TriAttentionPhaseProfile:
                 1,
                 _env_int("TRIATTN_RUNTIME_PHASE_LOG_EVERY", default_phase_every),
             ),
+            top_n=max(1, _env_int("TRIATTN_RUNTIME_PHASE_TOP_N", 12)),
             sink_dir=os.environ.get("TRIATTN_RUNTIME_PERF_SINK_DIR"),
         )
 
@@ -132,19 +134,38 @@ class TriAttentionPhaseProfile:
             f"max={stats.max_ms:.2f},total={stats.total_ms:.1f}"
         )
 
+    @staticmethod
+    def _is_model_submodule_phase(name: str) -> bool:
+        return name.startswith(
+            (
+                "model_layer_",
+                "model_self_attn_",
+                "model_mlp_",
+            )
+        )
+
+    def _top_phases(
+        self,
+        phases: list[tuple[str, _PhaseStats]],
+        metric: str,
+    ) -> list[tuple[str, _PhaseStats]]:
+        if metric == "avg":
+            key = lambda item: item[1].avg_ms
+        else:
+            key = lambda item: item[1].total_ms
+        return sorted(phases, key=key, reverse=True)[: self.top_n]
+
     def _log_summary(self) -> None:
         if not self.phases:
             return
-        top_total = sorted(
-            self.phases.items(),
-            key=lambda item: item[1].total_ms,
-            reverse=True,
-        )[:8]
-        top_avg = sorted(
-            self.phases.items(),
-            key=lambda item: item[1].avg_ms,
-            reverse=True,
-        )[:8]
+        all_phases = list(self.phases.items())
+        top_total = self._top_phases(all_phases, "total")
+        top_avg = self._top_phases(all_phases, "avg")
+        model_phases = [
+            item for item in all_phases if self._is_model_submodule_phase(item[0])
+        ]
+        model_top_total = self._top_phases(model_phases, "total")
+        model_top_avg = self._top_phases(model_phases, "avg")
         detail_items = [
             (
                 name,
@@ -165,6 +186,16 @@ class TriAttentionPhaseProfile:
             f"top_total={'|'.join(self._format_phase(item) for item in top_total)} "
             f"top_avg={'|'.join(self._format_phase(item) for item in top_avg)}"
         )
+        if model_top_total:
+            line = (
+                f"{line} model_top_total="
+                f"{'|'.join(self._format_phase(item) for item in model_top_total)}"
+            )
+        if model_top_avg:
+            line = (
+                f"{line} model_top_avg="
+                f"{'|'.join(self._format_phase(item) for item in model_top_avg)}"
+            )
         if details:
             line = f"{line} details={details}"
         self.logger.info("%s", line)
