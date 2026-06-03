@@ -19,6 +19,7 @@ def execute_runner_compression_actions(
     log_decisions: bool,
     log_worker_events: bool = True,
     logging_enabled: bool = True,
+    log_execution_path: bool = False,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
@@ -66,6 +67,19 @@ def execute_runner_compression_actions(
                     }
                 )
                 continue
+        if log_execution_path:
+            logger.info(
+                "TRIATTN_EXEC_PATH runner_executor_enter req=%s step=%d "
+                "signal_reason=%s scheduled_tokens=%d estimated_cache_len=%d "
+                "prefill_len=%d strict=%s",
+                req_id,
+                signal.step,
+                getattr(signal, "reason", None),
+                int(getattr(signal, "scheduled_tokens", 1)),
+                int(getattr(signal, "estimated_cache_len", 0)),
+                int(getattr(signal, "prefill_len", 0)),
+                strict_no_downgrade,
+            )
         try:
             result = executor.execute(
                 req_id=req_id,
@@ -116,6 +130,25 @@ def execute_runner_compression_actions(
             )
             continue
 
+        if log_execution_path:
+            result_details = result.details if isinstance(result.details, dict) else {}
+            selector_debug = result_details.get("selector_debug")
+            execution_path = (
+                selector_debug.get("execution_path")
+                if isinstance(selector_debug, dict)
+                else None
+            )
+            logger.info(
+                "TRIATTN_EXEC_PATH runner_executor_result req=%s step=%d "
+                "applied=%s reason=%s cache_len_after=%s path=%s",
+                req_id,
+                signal.step,
+                result.applied,
+                result.reason,
+                result.cache_len_after,
+                execution_path,
+            )
+
         if (
             strict_no_downgrade
             and not result.applied
@@ -138,6 +171,7 @@ def execute_runner_compression_actions(
             reclaimed_block_count = details.get("reclaimed_block_count")
             recent_unabsorbed_tokens = details.get("recent_unabsorbed_tokens")
             selector_status = details.get("selector_status")
+            selector_debug = details.get("selector_debug")
             block_reclaim = details.get("block_reclaim")
             reclaim_mode = (
                 block_reclaim.get("mode")
@@ -147,18 +181,20 @@ def execute_runner_compression_actions(
             if log_worker_events:
                 logger.info(
                     "TriAttention compression applied req=%s step=%d reason=%s "
-                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
+                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s "
+                    "selector_debug=%s",
                     req_id, signal.step, result.reason,
                     before_len, cache_len_after, reclaimed_block_count,
-                    selector_status, reclaim_mode,
+                    selector_status, reclaim_mode, selector_debug,
                 )
             elif log_decisions:
                 logger.debug(
                     "TriAttention compression applied req=%s step=%d reason=%s "
-                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s",
+                    "before=%s after=%d reclaimed_blocks=%s selector=%s reclaim=%s "
+                    "selector_debug=%s",
                     req_id, signal.step, result.reason,
                     before_len, cache_len_after, reclaimed_block_count,
-                    selector_status, reclaim_mode,
+                    selector_status, reclaim_mode, selector_debug,
                 )
             # Resolve scheduler_nct for this request so state can record
             # the num_computed_tokens at compression time (used by

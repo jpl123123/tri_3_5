@@ -99,15 +99,16 @@ export TRIATTN_RUNTIME_LOGGING=0
 ```
 
 This suppresses TriAttention startup, scheduler/worker decision, compression
-event, and `TRIATTN_PERF` / `TRIATTN_E2E_PERF` / `TRIATTN_PHASE_PERF` profile
-logs. It overrides the detailed log/profile switches below. Error and safety
-warning logs are still emitted.
+event, execution-path trace, and `TRIATTN_PERF` / `TRIATTN_E2E_PERF` /
+`TRIATTN_PHASE_PERF` profile logs. It overrides the detailed log/profile
+switches below. Error and safety warning logs are still emitted.
 
 For debugging, enable the master switch and only the streams needed for the run:
 
 ```bash
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_DECISIONS=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_E2E_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
@@ -132,6 +133,13 @@ when the first compression boundary is reached on NPU. The `tp=rank/size`
 suffix confirms that runtime scoring is using this worker's tensor-parallel
 head shard. On vLLM-Ascend with `TRIATTN_RUNTIME_SCORING_BACKEND=auto`, the
 status should say `enabled:torch`, not `enabled:triton`.
+
+With `TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1`, each real compression boundary
+also emits `TRIATTN_EXEC_PATH` markers. Look for the sequence
+`runner_execute_model_compression_boundary`, `worker_hook_enter`,
+`group_pipeline_enter`, and `selector_scoring_enter`; the selector marker
+prints `backend=torch` on Ascend and `trig_enabled=True` when the sparse
+TriAttention trigonometric scoring path is active.
 
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression

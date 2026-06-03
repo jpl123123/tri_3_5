@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -11,6 +12,11 @@ import torch
 from .config import TriAttentionRuntimeConfig
 from .constants import TRITON_SCORING_REQUIRED_MARKER
 from .kv_compaction import build_keep_token_indices, gather_request_k_dense_range
+
+try:
+    from vllm.logger import logger as _runtime_logger
+except Exception:  # pragma: no cover - fallback for lightweight tests
+    _runtime_logger = logging.getLogger(__name__)
 
 def build_triattention_selector(
     config: TriAttentionRuntimeConfig,
@@ -204,6 +210,10 @@ def build_triattention_selector(
         and (is_ascend_runner or device_type not in {None, "cuda"})
     )
     score_backend_name = "torch" if use_torch_scoring else "triton"
+    log_execution_path = bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+    )
 
     tri_cfg_kwargs: dict[str, Any] = {}
     if effective_device is not None:
@@ -744,6 +754,62 @@ def build_triattention_selector(
             return max(block_size, total_tokens)
         return upper
 
+    def _log_selector_scoring_enter(
+        *,
+        req_id: str | None,
+        gid: int | None,
+        layer_idx: int | None,
+        mode: str,
+        total_tokens: int,
+        budget_total: int,
+        round_start: int,
+        chunk_tokens: int,
+        layer_indices: list[int] | None = None,
+    ) -> None:
+        if not log_execution_path:
+            return
+        _runtime_logger.info(
+            "TRIATTN_EXEC_PATH selector_scoring_enter req=%s gid=%s layer=%s "
+            "mode=%s backend=%s total_tokens=%d budget_total=%d round_start=%d "
+            "chunk_tokens=%d trig_enabled=%s normalize=%s layers=%s",
+            req_id,
+            gid,
+            layer_idx,
+            mode,
+            score_backend_name,
+            int(total_tokens),
+            int(budget_total),
+            int(round_start),
+            int(chunk_tokens),
+            not bool(getattr(config, "disable_trig", False)),
+            bool(getattr(config, "sparse_normalize_scores", False)),
+            layer_indices,
+        )
+
+    def _selector_debug(
+        *,
+        execution_path: str,
+        total_tokens: int,
+        chunk_tokens: int,
+        layer_indices: list[int] | None = None,
+        total_layer_count: int | None = None,
+    ) -> dict[str, Any]:
+        debug = {
+            "debug_execution_path": execution_path,
+            "debug_score_backend": score_backend_name,
+            "debug_recent_count": _resolve_effective_recent_count(total_tokens),
+            "debug_chunk_tokens": int(chunk_tokens),
+            "debug_trig_enabled": not bool(getattr(config, "disable_trig", False)),
+            "debug_normalize_scores": bool(
+                getattr(config, "sparse_normalize_scores", False)
+            ),
+        }
+        if layer_indices is not None:
+            debug["debug_score_layer_indices"] = list(layer_indices)
+        if total_layer_count is not None:
+            debug["debug_score_layer_count_total"] = int(total_layer_count)
+        return debug
+
     def _select_keep_indices_paged_streaming(
         *,
         kv_cache: Any,
@@ -755,6 +821,8 @@ def build_triattention_selector(
         layer_idx: int,
         round_start: int,
         budget_total: int,
+        req_id: str | None = None,
+        gid: int | None = None,
     ) -> dict[str, Any]:
         runtime_heads = _kv_cache_num_heads(kv_cache)
         (
@@ -767,6 +835,17 @@ def build_triattention_selector(
             runtime_heads=runtime_heads,
         )
         chunk_tokens = _score_chunk_tokens(block_size, total_tokens)
+        _log_selector_scoring_enter(
+            req_id=req_id,
+            gid=gid,
+            layer_idx=layer_idx,
+            mode="paged_layer",
+            total_tokens=total_tokens,
+            budget_total=budget_total,
+            round_start=round_start,
+            chunk_tokens=chunk_tokens,
+            layer_indices=[int(layer_idx)],
+        )
         k = min(budget_total, total_tokens)
         if k <= 0:
             return {"mode": "shared", "indices": []}
@@ -946,9 +1025,29 @@ def build_triattention_selector(
             return {"mode": "shared", "indices": []}
         if wants_per_head and best_indices.ndim == 2:
             keep_per_head = torch.sort(best_indices, dim=-1).values.contiguous()
-            return {"mode": "per_head", "indices": keep_per_head}
+            return {
+                "mode": "per_head",
+                "indices": keep_per_head,
+                **_selector_debug(
+                    execution_path="selector_hf>paged_layer>triattention_scoring",
+                    total_tokens=total_tokens,
+                    chunk_tokens=chunk_tokens,
+                    layer_indices=[int(layer_idx)],
+                    total_layer_count=1,
+                ),
+            }
         keep = torch.sort(best_indices, dim=-1).values.contiguous()
-        return {"mode": "shared", "indices": keep}
+        return {
+            "mode": "shared",
+            "indices": keep,
+            **_selector_debug(
+                execution_path="selector_hf>paged_layer>triattention_scoring",
+                total_tokens=total_tokens,
+                chunk_tokens=chunk_tokens,
+                layer_indices=[int(layer_idx)],
+                total_layer_count=1,
+            ),
+        }
 
     def _select_keep_indices(
         *,
@@ -962,6 +1061,8 @@ def build_triattention_selector(
         layer_idx: int,
         round_start: int,
         budget_total: int,
+        req_id: str | None = None,
+        gid: int | None = None,
     ) -> dict[str, Any] | None:
         if total_tokens <= budget_total:
             return {"mode": "shared", "indices": list(range(total_tokens))}
@@ -969,6 +1070,17 @@ def build_triattention_selector(
             return None
 
         if keys_dense is not None:
+            _log_selector_scoring_enter(
+                req_id=req_id,
+                gid=gid,
+                layer_idx=layer_idx,
+                mode="dense_layer",
+                total_tokens=total_tokens,
+                budget_total=budget_total,
+                round_start=round_start,
+                chunk_tokens=total_tokens,
+                layer_indices=[int(layer_idx)],
+            )
             scores = _compute_layer_scores(
                 keys_dense=keys_dense,
                 layer_idx=layer_idx,
@@ -987,6 +1099,8 @@ def build_triattention_selector(
                 prefill_len=prefill_len,
                 protect_prefill=protect_prefill,
                 budget_total=budget_total,
+                req_id=req_id,
+                gid=gid,
             )
             return paged_result
         else:
@@ -1005,7 +1119,17 @@ def build_triattention_selector(
                 sorted=False,
             ).indices[0]
             keep_per_head = torch.sort(topk, dim=-1).values.contiguous()
-            return {"mode": "per_head", "indices": keep_per_head}
+            return {
+                "mode": "per_head",
+                "indices": keep_per_head,
+                **_selector_debug(
+                    execution_path="selector_hf>dense_layer>triattention_scoring",
+                    total_tokens=total_tokens,
+                    chunk_tokens=total_tokens,
+                    layer_indices=[int(layer_idx)],
+                    total_layer_count=1,
+                ),
+            }
 
         scores_agg = scores
         if scores_agg.ndim == 3:
@@ -1018,7 +1142,17 @@ def build_triattention_selector(
             sorted=False,
         ).indices[0]
         keep = torch.sort(selected).values.contiguous()
-        return {"mode": "shared", "indices": keep}
+        return {
+            "mode": "shared",
+            "indices": keep,
+            **_selector_debug(
+                execution_path="selector_hf>dense_layer>triattention_scoring",
+                total_tokens=total_tokens,
+                chunk_tokens=total_tokens,
+                layer_indices=[int(layer_idx)],
+                total_layer_count=1,
+            ),
+        }
 
     def _select_keep_indices_for_group_per_head(
         *,
@@ -1034,6 +1168,8 @@ def build_triattention_selector(
         protect_prefill: bool,
         round_start: int,
         budget_total: int,
+        req_id: str | None = None,
+        gid: int | None = None,
     ) -> dict[str, Any] | None:
         if requested_pruning_mode != "per_head":
             return None
@@ -1126,6 +1262,17 @@ def build_triattention_selector(
 
             min_block_size = min(entry["block_size"] for entry in prepared_layers)
             chunk_tokens = _score_chunk_tokens(min_block_size, total_tokens)
+            _log_selector_scoring_enter(
+                req_id=req_id,
+                gid=gid,
+                layer_idx=None,
+                mode="paged_global_per_head",
+                total_tokens=total_tokens,
+                budget_total=budget_total,
+                round_start=round_start,
+                chunk_tokens=chunk_tokens,
+                layer_indices=prepared_layer_indices,
+            )
             norm_stats: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(prepared_layers)
             raw_scores_cache_by_layer: list[list[torch.Tensor] | None] = [None] * len(prepared_layers)
             if config.sparse_normalize_scores:
@@ -1303,16 +1450,32 @@ def build_triattention_selector(
                 "group_agg_mode": group_agg_mode,
                 "debug_group_layer_indices": prepared_layer_indices,
                 "debug_group_layer_count_total": total_layer_entries,
-                "debug_recent_count": _resolve_effective_recent_count(total_tokens),
+                **_selector_debug(
+                    execution_path="selector_hf>paged_global_per_head>triattention_scoring",
+                    total_tokens=total_tokens,
+                    chunk_tokens=chunk_tokens,
+                    layer_indices=prepared_layer_indices,
+                    total_layer_count=total_layer_entries,
+                ),
             }
         else:
             if iter_mode in {"dense_iter", "dense_list"}:
                 iter_inputs = _filter_layer_entries_for_scoring(list(iter_inputs))
+            dense_layer_indices = [int(layer_idx) for layer_idx, _keys_dense in iter_inputs]
+            _log_selector_scoring_enter(
+                req_id=req_id,
+                gid=gid,
+                layer_idx=None,
+                mode=iter_mode,
+                total_tokens=total_tokens,
+                budget_total=budget_total,
+                round_start=round_start,
+                chunk_tokens=total_tokens,
+                layer_indices=dense_layer_indices,
+            )
             aggregated_scores: torch.Tensor | None = None
             layer_count = 0
-            dense_layer_indices: list[int] = []
             for layer_idx, keys_dense in iter_inputs:
-                dense_layer_indices.append(int(layer_idx))
                 scores = _compute_layer_scores(
                     keys_dense=keys_dense,
                     layer_idx=layer_idx,
@@ -1352,7 +1515,13 @@ def build_triattention_selector(
                 "group_agg_mode": "mean",
                 "debug_group_layer_indices": dense_layer_indices,
                 "debug_group_layer_count_total": len(dense_layer_indices),
-                "debug_recent_count": _resolve_effective_recent_count(total_tokens),
+                **_selector_debug(
+                    execution_path="selector_hf>dense_global_per_head>triattention_scoring",
+                    total_tokens=total_tokens,
+                    chunk_tokens=total_tokens,
+                    layer_indices=dense_layer_indices,
+                    total_layer_count=len(dense_layer_indices),
+                ),
             }
 
     setattr(_select_keep_indices, "_supports_paged", True)

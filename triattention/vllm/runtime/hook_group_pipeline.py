@@ -22,6 +22,7 @@ class GroupPipelineOutcome:
     block_reclaim_groups: list[ReclaimGroup]
     mutable_block_ids_by_group: list[list[int] | None]
     reclaim_mode: str = "truncate_tail"
+    selector_debug: dict[str, Any] | None = None
 
 
 def normalize_mutable_block_ids_by_group(
@@ -136,6 +137,10 @@ def try_build_recency_tail_block_remap(
         block_reclaim_groups=reclaim_groups,
         mutable_block_ids_by_group=remapped_block_ids_by_group,
         reclaim_mode="remap_tail",
+        selector_debug={
+            "execution_path": "worker_hook>zero_copy_recency_tail",
+            "score_backend": "recency_only",
+        },
     )
 
 
@@ -162,6 +167,7 @@ def run_group_compaction_pipeline(
     expected_cache_len_after: int | None = None
     selection_mode = "fallback"
     block_reclaim_groups: list[ReclaimGroup] = []
+    selector_debug_by_group: list[dict[str, Any]] = []
 
     for gid, normalized_block_ids in enumerate(mutable_block_ids_by_group):
         if not normalized_block_ids:
@@ -201,6 +207,16 @@ def run_group_compaction_pipeline(
             raise
         prepared_layer_compactions = group_selection.tasks
         selection_mode = group_selection.selection_mode
+        selector_debug_by_group.append(
+            {
+                "gid": gid,
+                "selection_mode": str(group_selection.selection_mode),
+                "group_total_tokens": int(group_total_tokens),
+                "group_budget_total": int(group_budget_total),
+                "layer_count": len(prepared_layer_compactions),
+                "selector": group_selection.selector_debug,
+            }
+        )
 
         try:
             group_outcome = execute_group_compaction(
@@ -252,6 +268,10 @@ def run_group_compaction_pipeline(
         selection_mode=str(selection_mode),
         block_reclaim_groups=block_reclaim_groups,
         mutable_block_ids_by_group=mutable_block_ids_by_group,
+        selector_debug={
+            "execution_path": "worker_hook>group_pipeline>selector_hf>layout_compaction",
+            "groups": selector_debug_by_group,
+        },
     )
 
 
@@ -296,5 +316,6 @@ def finalize_hook_placement_result(
             else None
         ),
         block_reclaim=block_reclaim_payload,
+        selector_debug=outcome.selector_debug,
     )
     return placement_plan.to_hook_result_dict()

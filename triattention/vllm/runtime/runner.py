@@ -242,6 +242,10 @@ class TriAttentionModelRunner:
         )
         self._pending_compression_events: list[dict[str, Any]] = []
         self._strict_no_downgrade = bool(self.config.enable_experimental_kv_compaction)
+        self._log_execution_path = bool(
+            getattr(self.config, "logging_enabled", True)
+            and getattr(self.config, "log_execution_path", True)
+        )
         self._runtime_input_patch_installed = False
         if bool(getattr(self.config, "preinstall_input_patch", True)):
             self._runtime_input_patch_installed = bool(install_runtime_input_patch())
@@ -744,6 +748,7 @@ class TriAttentionModelRunner:
             log_decisions=bool(self.config.log_decisions),
             log_worker_events=bool(self._log_worker_events),
             logging_enabled=bool(self.config.logging_enabled),
+            log_execution_path=bool(self._log_execution_path),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:
@@ -914,6 +919,20 @@ class TriAttentionModelRunner:
             "supplement_worker_self_triggers",
             lambda: self._supplement_worker_self_triggers(scheduler_output, signals),
         )
+        if self._log_execution_path:
+            triggered_req_ids = [
+                req_id
+                for req_id, signal in signals.items()
+                if bool(getattr(signal, "should_compress", False))
+            ]
+            if triggered_req_ids:
+                self._logger.info(
+                    "TRIATTN_EXEC_PATH runner_execute_model_compression_boundary "
+                    "step=%d triggered=%d reqs=%s",
+                    self._last_step,
+                    len(triggered_req_ids),
+                    ",".join(str(req_id) for req_id in triggered_req_ids[:8]),
+                )
         t_state_ms = (time.perf_counter() - t0) * 1000.0 if timed_enabled else 0.0
         t0 = time.perf_counter() if timed_enabled else 0.0
         _timed(

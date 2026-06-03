@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,67 @@ _OVERRIDE_FIRST_KEEP_CACHE: torch.Tensor | None = None
 class PreparedGroupSelection:
     tasks: list[PreparedLayerCompaction]
     selection_mode: str
+    selector_debug: dict[str, Any] | None = None
+
+
+_SELECTOR_DEBUG_KEYS = {
+    "semantic",
+    "group_agg_mode",
+    "debug_execution_path",
+    "debug_score_backend",
+    "debug_group_layer_indices",
+    "debug_group_layer_count_total",
+    "debug_score_layer_indices",
+    "debug_score_layer_count_total",
+    "debug_recent_count",
+    "debug_chunk_tokens",
+    "debug_trig_enabled",
+    "debug_normalize_scores",
+}
+
+
+def _extract_selector_debug(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    debug: dict[str, Any] = {}
+    for key in _SELECTOR_DEBUG_KEYS:
+        if key not in result:
+            continue
+        value = result[key]
+        if hasattr(value, "tolist"):
+            try:
+                value = value.tolist()
+            except Exception:
+                value = str(value)
+        debug[key.removeprefix("debug_")] = value
+    return debug or None
+
+
+def _call_selector(
+    fn: Callable[..., dict[str, Any] | None],
+    *,
+    req_id: str,
+    gid: int,
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    call_kwargs = dict(kwargs)
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        call_kwargs["req_id"] = req_id
+        call_kwargs["gid"] = gid
+        return fn(**call_kwargs)
+
+    params = signature.parameters
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in params.values()
+    )
+    if accepts_kwargs or "req_id" in params:
+        call_kwargs["req_id"] = req_id
+    if accepts_kwargs or "gid" in params:
+        call_kwargs["gid"] = gid
+    return fn(**call_kwargs)
 
 
 def _kv_cache_device(kv_cache: Any) -> torch.device:
@@ -126,6 +188,7 @@ def prepare_group_layer_compactions(
     selected_for_group: dict[str, Any] | None = None
     prepared_layer_compactions: list[PreparedLayerCompaction] = []
     selection_mode = "fallback"
+    selector_debug: dict[str, Any] | None = None
 
     if (
         select_keep_indices_for_group is not None
@@ -146,15 +209,20 @@ def prepare_group_layer_compactions(
                     for layer_idx, kv_cache in layer_tensors:
                         yield layer_idx, kv_cache, normalized_block_ids, block_size
 
-                selected_for_group = select_keep_indices_for_group(
-                    layer_inputs=None,
-                    layer_input_iter=None,
-                    layer_kv_iter=_iter_layer_kv,
-                    total_tokens=group_total_tokens,
-                    prefill_len=group_prefill_len,
-                    protect_prefill=protect_prefill,
-                    round_start=round_start,
-                    budget_total=group_budget_total,
+                selected_for_group = _call_selector(
+                    select_keep_indices_for_group,
+                    req_id=req_id,
+                    gid=gid,
+                    kwargs={
+                        "layer_inputs": None,
+                        "layer_input_iter": None,
+                        "layer_kv_iter": _iter_layer_kv,
+                        "total_tokens": group_total_tokens,
+                        "prefill_len": group_prefill_len,
+                        "protect_prefill": protect_prefill,
+                        "round_start": round_start,
+                        "budget_total": group_budget_total,
+                    },
                 )
             else:
 
@@ -177,15 +245,20 @@ def prepare_group_layer_compactions(
                         )
                         yield layer_idx, keys_dense
 
-                selected_for_group = select_keep_indices_for_group(
-                    layer_inputs=None,
-                    layer_input_iter=_iter_layer_inputs,
-                    layer_kv_iter=None,
-                    total_tokens=group_total_tokens,
-                    prefill_len=group_prefill_len,
-                    protect_prefill=protect_prefill,
-                    round_start=round_start,
-                    budget_total=group_budget_total,
+                selected_for_group = _call_selector(
+                    select_keep_indices_for_group,
+                    req_id=req_id,
+                    gid=gid,
+                    kwargs={
+                        "layer_inputs": None,
+                        "layer_input_iter": _iter_layer_inputs,
+                        "layer_kv_iter": None,
+                        "total_tokens": group_total_tokens,
+                        "prefill_len": group_prefill_len,
+                        "protect_prefill": protect_prefill,
+                        "round_start": round_start,
+                        "budget_total": group_budget_total,
+                    },
                 )
         except Exception as exc:
             raise RuntimeError(
@@ -211,17 +284,22 @@ def prepare_group_layer_compactions(
                     if not getattr(select_keep_indices, "_supports_paged", False):
                         raise RuntimeError("paged_selector_required")
                 if getattr(select_keep_indices, "_supports_paged", False):
-                    selected = select_keep_indices(
-                        keys_dense=None,
-                        kv_cache=kv_cache,
-                        block_ids=block_ids_tensor,
-                        block_size=block_size,
-                        total_tokens=group_total_tokens,
-                        prefill_len=group_prefill_len,
-                        protect_prefill=protect_prefill,
-                        layer_idx=layer_idx,
-                        round_start=round_start,
-                        budget_total=group_budget_total,
+                    selected = _call_selector(
+                        select_keep_indices,
+                        req_id=req_id,
+                        gid=gid,
+                        kwargs={
+                            "keys_dense": None,
+                            "kv_cache": kv_cache,
+                            "block_ids": block_ids_tensor,
+                            "block_size": block_size,
+                            "total_tokens": group_total_tokens,
+                            "prefill_len": group_prefill_len,
+                            "protect_prefill": protect_prefill,
+                            "layer_idx": layer_idx,
+                            "round_start": round_start,
+                            "budget_total": group_budget_total,
+                        },
                     )
                 else:
                     keys_dense = gather_dense(
@@ -230,14 +308,19 @@ def prepare_group_layer_compactions(
                         block_size=block_size,
                         total_tokens=group_total_tokens,
                     )
-                    selected = select_keep_indices(
-                        keys_dense=keys_dense,
-                        total_tokens=group_total_tokens,
-                        prefill_len=group_prefill_len,
-                        protect_prefill=protect_prefill,
-                        layer_idx=layer_idx,
-                        round_start=round_start,
-                        budget_total=group_budget_total,
+                    selected = _call_selector(
+                        select_keep_indices,
+                        req_id=req_id,
+                        gid=gid,
+                        kwargs={
+                            "keys_dense": keys_dense,
+                            "total_tokens": group_total_tokens,
+                            "prefill_len": group_prefill_len,
+                            "protect_prefill": protect_prefill,
+                            "layer_idx": layer_idx,
+                            "round_start": round_start,
+                            "budget_total": group_budget_total,
+                        },
                     )
             except Exception as exc:
                 raise RuntimeError(
@@ -266,6 +349,7 @@ def prepare_group_layer_compactions(
             selected_from_fallback = True
 
         keep_plan = KeepPlan.from_selector_result(selected)
+        selector_debug = _extract_selector_debug(selected) or selector_debug
         keep_plan = _maybe_override_first_keep_plan(
             keep_plan=keep_plan,
             req_id=req_id,
@@ -286,4 +370,5 @@ def prepare_group_layer_compactions(
     return PreparedGroupSelection(
         tasks=prepared_layer_compactions,
         selection_mode=str(selection_mode),
+        selector_debug=selector_debug,
     )

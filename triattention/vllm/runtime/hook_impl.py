@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 import torch
@@ -26,6 +27,11 @@ from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
 from .selector_hf import build_triattention_selector as _build_triattention_selector_impl
 from .signals import CompressionSignal
 from .thresholds import is_ascend_runtime
+
+try:
+    from vllm.logger import logger as _runtime_logger
+except Exception:  # pragma: no cover - fallback for lightweight tests
+    _runtime_logger = logging.getLogger(__name__)
 
 # Selector implementation moved to triattention_runtime/selector_hf.py (D-017).
 
@@ -52,6 +58,20 @@ def make_runner_compression_hook(
         ) = _build_triattention_selector(config)
     group_tensors_cache: dict[int, list[tuple[int, Any]]] | None = None
     compressed_once: set[str] = set()
+    log_execution_path = bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+    )
+
+    if log_execution_path:
+        _runtime_logger.info(
+            "TRIATTN_EXEC_PATH hook_installed selector_status=%s "
+            "compaction=%s block_reclaim=%s sparse_stats=%s",
+            selector_status,
+            bool(getattr(config, "enable_experimental_kv_compaction", False)),
+            bool(getattr(config, "enable_experimental_block_reclaim", False)),
+            str(getattr(config, "sparse_stats_path", None)),
+        )
 
     def _get_group_tensors() -> dict[int, list[tuple[int, Any]]]:
         nonlocal group_tensors_cache
@@ -61,6 +81,19 @@ def make_runner_compression_hook(
 
     def _hook(req_id: str, signal: CompressionSignal, scheduler_output: Any) -> dict[str, Any]:
         setattr(base_runner, "_triattention_active_req_id", req_id)
+        if log_execution_path:
+            _runtime_logger.info(
+                "TRIATTN_EXEC_PATH worker_hook_enter req=%s step=%d "
+                "signal_reason=%s scheduled_tokens=%d estimated_cache_len=%d "
+                "prefill_len=%d selector_status=%s",
+                req_id,
+                int(getattr(signal, "step", 0)),
+                getattr(signal, "reason", None),
+                int(getattr(signal, "scheduled_tokens", 1)),
+                int(getattr(signal, "estimated_cache_len", 0)),
+                int(getattr(signal, "prefill_len", 0)),
+                selector_status,
+            )
         strict_triton_required = bool(
             config.enable_experimental_kv_compaction and config.require_triton_scoring
         )
@@ -96,6 +129,18 @@ def make_runner_compression_hook(
         budget_total = runtime_ctx.budget_total
         recent_unabsorbed_tokens = runtime_ctx.recent_unabsorbed_tokens
         should_defer_recompress = runtime_ctx.should_defer_recompress
+        if log_execution_path:
+            _runtime_logger.info(
+                "TRIATTN_EXEC_PATH worker_hook_runtime_context req=%s step=%d "
+                "effective_tokens=%d budget_total=%d recent_unabsorbed=%s "
+                "strict_triton_required=%s",
+                req_id,
+                int(getattr(signal, "step", 0)),
+                int(effective_tokens),
+                int(budget_total),
+                recent_unabsorbed_tokens,
+                strict_triton_required,
+            )
         if should_defer_recompress:
             return {
                 "applied": False,
@@ -162,6 +207,16 @@ def make_runner_compression_hook(
             block_size=block_size,
         )
         if zero_copy_outcome is not None:
+            if log_execution_path:
+                _runtime_logger.info(
+                    "TRIATTN_EXEC_PATH zero_copy_tail_enter req=%s step=%d "
+                    "effective_tokens=%d budget_total=%d block_size=%d",
+                    req_id,
+                    int(getattr(signal, "step", 0)),
+                    int(effective_tokens),
+                    int(budget_total),
+                    int(block_size),
+                )
             compressed_once.add(req_id)
             return finalize_hook_placement_result(
                 req_state=req_state,
@@ -186,6 +241,26 @@ def make_runner_compression_hook(
             }
 
         group_tensors = _get_group_tensors()
+        if log_execution_path:
+            layer_count = sum(len(v) for v in group_tensors.values())
+            _runtime_logger.info(
+                "TRIATTN_EXEC_PATH group_pipeline_enter req=%s step=%d "
+                "groups=%d layers=%d block_size=%d effective_tokens=%d "
+                "budget_total=%d selector_status=%s",
+                req_id,
+                int(getattr(signal, "step", 0)),
+                len(group_tensors),
+                layer_count,
+                int(block_size),
+                int(effective_tokens),
+                int(budget_total),
+                selector_status,
+            )
+            setattr(
+                base_runner,
+                "_triattention_active_signal_step",
+                int(getattr(signal, "step", 0)),
+            )
         pipeline_out = run_group_compaction_pipeline(
             req_id=req_id,
             signal=signal,
@@ -204,9 +279,27 @@ def make_runner_compression_hook(
             gather_dense_fn=gather_request_k_dense,
         )
         if isinstance(pipeline_out, dict):
+            if log_execution_path:
+                _runtime_logger.info(
+                    "TRIATTN_EXEC_PATH group_pipeline_result req=%s step=%d "
+                    "applied=False reason=%s",
+                    req_id,
+                    int(getattr(signal, "step", 0)),
+                    pipeline_out.get("reason"),
+                )
             return pipeline_out
 
         compressed_once.add(req_id)
+        if log_execution_path:
+            _runtime_logger.info(
+                "TRIATTN_EXEC_PATH group_pipeline_result req=%s step=%d "
+                "applied=True selection_mode=%s cache_len_after=%d selector_debug=%s",
+                req_id,
+                int(getattr(signal, "step", 0)),
+                pipeline_out.selection_mode,
+                int(pipeline_out.cache_len_after),
+                pipeline_out.selector_debug,
+            )
         return finalize_hook_placement_result(
             req_state=req_state,
             original_block_ids_by_group=original_block_ids_by_group,

@@ -39,6 +39,7 @@ class TriAttentionRuntimeConfig:
     require_physical_reclaim: bool = True
     logging_enabled: bool = True
     log_decisions: bool = True
+    log_execution_path: bool = True
     fail_on_effective_len_regression: bool = True
     effective_len_regression_ratio: float = 0.9
     effective_len_guard_divide_multiples: int = 2
@@ -112,12 +113,17 @@ class TriAttentionRuntimeConfig:
         model_path_raw = maybe_str("MODEL_PATH", None)
         logging_enabled = maybe_bool("LOGGING", cls.logging_enabled)
         log_decisions = maybe_bool("LOG_DECISIONS", cls.log_decisions)
+        log_execution_path = maybe_bool(
+            "LOG_EXECUTION_PATH",
+            cls.log_execution_path,
+        )
         log_all_worker_events = maybe_bool(
             "LOG_ALL_WORKER_EVENTS",
             cls.log_all_worker_events,
         )
         if not logging_enabled:
             log_decisions = False
+            log_execution_path = False
             log_all_worker_events = False
         fast_recency_only = maybe_bool("FAST_RECENCY_ONLY", cls.fast_recency_only)
         fast_recency_accuracy_guard_default = cls.fast_recency_accuracy_guard
@@ -158,6 +164,7 @@ class TriAttentionRuntimeConfig:
             ),
             logging_enabled=logging_enabled,
             log_decisions=log_decisions,
+            log_execution_path=log_execution_path,
             fail_on_effective_len_regression=maybe_bool(
                 "FAIL_ON_EFFECTIVE_LEN_REGRESSION",
                 cls.fail_on_effective_len_regression,

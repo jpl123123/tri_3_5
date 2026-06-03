@@ -111,6 +111,7 @@ class PlacementPlan:
     budget_total: int
     recent_unabsorbed_tokens: int | None
     block_reclaim: ReclaimEvent | None = None
+    selector_debug: dict[str, Any] | None = None
 
     @property
     def reclaimed_block_count(self) -> int:
@@ -131,4 +132,5 @@ class PlacementPlan:
             "budget_total": self.budget_total,
             "reclaimed_block_count": self.reclaimed_block_count,
             "recent_unabsorbed_tokens": self.recent_unabsorbed_tokens,
+            "selector_debug": self.selector_debug,
         }
