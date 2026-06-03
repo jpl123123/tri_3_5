@@ -15,6 +15,7 @@ def test_runtime_logging_defaults_keep_existing_decision_logs(monkeypatch):
     monkeypatch.delenv("TRIATTN_RUNTIME_LOGGING", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_LOG_DECISIONS", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH", raising=False)
+    monkeypatch.delenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS", raising=False)
 
     config = TriAttentionRuntimeConfig.from_env()
@@ -22,6 +23,7 @@ def test_runtime_logging_defaults_keep_existing_decision_logs(monkeypatch):
     assert config.logging_enabled
     assert config.log_decisions
     assert config.log_execution_path
+    assert not config.log_execution_path_core_only
     assert not config.log_all_worker_events
 
 
@@ -29,6 +31,7 @@ def test_runtime_logging_master_overrides_verbose_subswitches(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_LOGGING", "0")
     monkeypatch.setenv("TRIATTN_RUNTIME_LOG_DECISIONS", "1")
     monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH", "1")
+    monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY", "1")
     monkeypatch.setenv("TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS", "1")
 
     config = TriAttentionRuntimeConfig.from_env()
@@ -36,17 +39,32 @@ def test_runtime_logging_master_overrides_verbose_subswitches(monkeypatch):
     assert not config.logging_enabled
     assert not config.log_decisions
     assert not config.log_execution_path
+    assert not config.log_execution_path_core_only
     assert not config.log_all_worker_events
 
 
 def test_runtime_execution_path_log_can_be_disabled(monkeypatch):
     monkeypatch.setenv("TRIATTN_RUNTIME_LOGGING", "1")
     monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH", "0")
+    monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY", "1")
 
     config = TriAttentionRuntimeConfig.from_env()
 
     assert config.logging_enabled
     assert not config.log_execution_path
+    assert not config.log_execution_path_core_only
+
+
+def test_runtime_execution_path_core_only_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("TRIATTN_RUNTIME_LOGGING", "1")
+    monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH", "1")
+    monkeypatch.setenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY", "1")
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.logging_enabled
+    assert config.log_execution_path
+    assert config.log_execution_path_core_only
 
 
 def test_runtime_logging_master_disables_perf_profiles(monkeypatch):

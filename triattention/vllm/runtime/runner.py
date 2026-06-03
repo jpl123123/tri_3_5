@@ -246,6 +246,10 @@ class TriAttentionModelRunner:
             getattr(self.config, "logging_enabled", True)
             and getattr(self.config, "log_execution_path", True)
         )
+        self._log_execution_path_core_only = bool(
+            self._log_execution_path
+            and getattr(self.config, "log_execution_path_core_only", False)
+        )
         self._logged_execution_path_trigger_guards: set[tuple[str, str]] = set()
         self._runtime_input_patch_installed = False
         if bool(getattr(self.config, "preinstall_input_patch", True)):
@@ -815,6 +819,7 @@ class TriAttentionModelRunner:
             log_worker_events=bool(self._log_worker_events),
             logging_enabled=bool(self.config.logging_enabled),
             log_execution_path=bool(self._log_execution_path),
+            log_execution_path_core_only=bool(self._log_execution_path_core_only),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:
@@ -985,7 +990,7 @@ class TriAttentionModelRunner:
             "supplement_worker_self_triggers",
             lambda: self._supplement_worker_self_triggers(scheduler_output, signals),
         )
-        if self._log_execution_path:
+        if self._log_execution_path and not self._log_execution_path_core_only:
             triggered_req_ids = [
                 req_id
                 for req_id, signal in signals.items()

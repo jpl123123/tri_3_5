@@ -268,6 +268,20 @@ export TRIATTN_RUNTIME_E2E_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
 ```
 
+To keep only the core runtime path markers while suppressing repetitive
+boundary and expected-skip logs, use:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_DECISIONS=0
+export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
+export TRIATTN_RUNTIME_PERF_PROFILE=0
+export TRIATTN_RUNTIME_E2E_PROFILE=0
+export TRIATTN_RUNTIME_PHASE_PROFILE=0
+```
+
 ### Configuration Reference
 
 | Environment Variable | Default | Description |
@@ -275,6 +289,7 @@ export TRIATTN_RUNTIME_PHASE_PROFILE=1
 | `TRIATTN_RUNTIME_LOGGING` | `true` | Master switch for TriAttention runtime/profile diagnostic logs; set `0` for quiet performance tests |
 | `TRIATTN_RUNTIME_LOG_DECISIONS` | `true` | Emit scheduler/worker compression decisions when logging is enabled |
 | `TRIATTN_RUNTIME_LOG_EXECUTION_PATH` | `true` | Emit `TRIATTN_EXEC_PATH` markers that prove the request reached the TriAttention runner/hook path, including guard reasons before a hook is entered and selector/scoring markers after a real compression boundary |
+| `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY` | `false` | With execution-path logging enabled, suppress high-frequency boundary/context and expected-skip logs so core markers such as `hook_installed`, `worker_hook_enter`, `group_pipeline_enter`, `selector_scoring_enter`, and applied/unexpected results stand out |
 | `TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS` | `false` | Emit compression event logs on every worker instead of rank 0 only when logging is enabled |
 | `TRIATTN_RUNTIME_PERF_PROFILE` | `false` | Emit aggregated `TRIATTN_PERF` counters when logging is enabled |
 | `TRIATTN_RUNTIME_E2E_PROFILE` | `false` | Emit aggregated `TRIATTN_E2E_PERF` counters when logging is enabled |

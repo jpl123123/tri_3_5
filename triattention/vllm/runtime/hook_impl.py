@@ -22,7 +22,10 @@ from .hook_group_pipeline import (
     try_build_recency_tail_block_remap,
 )
 from .hook_preflight import resolve_hook_compaction_inputs, resolve_hook_request_context
-from .fast_recency_guard import should_guard_fast_recency_long_context
+from .fast_recency_guard import (
+    should_guard_fast_recency_long_context,
+    uses_pure_fast_recency,
+)
 from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
 from .selector_hf import build_triattention_selector as _build_triattention_selector_impl
 from .signals import CompressionSignal
@@ -61,6 +64,10 @@ def make_runner_compression_hook(
     log_execution_path = bool(
         getattr(config, "logging_enabled", True)
         and getattr(config, "log_execution_path", True)
+    )
+    log_execution_path_core_only = bool(
+        log_execution_path
+        and getattr(config, "log_execution_path_core_only", False)
     )
 
     if log_execution_path:
@@ -129,7 +136,7 @@ def make_runner_compression_hook(
         budget_total = runtime_ctx.budget_total
         recent_unabsorbed_tokens = runtime_ctx.recent_unabsorbed_tokens
         should_defer_recompress = runtime_ctx.should_defer_recompress
-        if log_execution_path:
+        if log_execution_path and not log_execution_path_core_only:
             _runtime_logger.info(
                 "TRIATTN_EXEC_PATH worker_hook_runtime_context req=%s step=%d "
                 "effective_tokens=%d budget_total=%d recent_unabsorbed=%s "
@@ -229,7 +236,7 @@ def make_runner_compression_hook(
                 recent_unabsorbed_tokens=recent_unabsorbed_tokens,
             )
         if (
-            bool(getattr(config, "fast_recency_only", False))
+            uses_pure_fast_recency(config)
             and bool(getattr(config, "enable_zero_copy_recency", True))
             and bool(getattr(config, "zero_copy_recency_only_on_ascend", True))
             and is_ascend_runtime(base_runner)

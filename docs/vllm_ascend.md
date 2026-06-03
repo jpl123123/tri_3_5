@@ -114,6 +114,20 @@ export TRIATTN_RUNTIME_E2E_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
 ```
 
+To show only the core execution path and avoid repetitive expected-skip logs,
+use:
+
+```bash
+export TRIATTN_RUNTIME_LOGGING=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_DECISIONS=0
+export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
+export TRIATTN_RUNTIME_PERF_PROFILE=0
+export TRIATTN_RUNTIME_E2E_PROFILE=0
+export TRIATTN_RUNTIME_PHASE_PROFILE=0
+```
+
 ## Expected Logs
 
 With `TRIATTN_RUNTIME_LOGGING=1`, look for these startup log lines:
@@ -151,6 +165,38 @@ reason and key lengths. For example, pure recency diagnostics with
 default long-context guard report `reason=fast_recency_long_context_guard`
 above `TRIATTN_RUNTIME_FAST_RECENCY_LONG_CONTEXT_GUARD_TOKENS` instead of
 entering `worker_hook_enter`.
+
+With `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1`, high-frequency
+`runner_execute_model_compression_boundary`, `runner_executor_enter`,
+`worker_hook_runtime_context`, and expected skip result logs are suppressed.
+The important markers remain: `hook_installed`, `runner_trigger_guard`,
+`worker_hook_enter`, `zero_copy_tail_enter`, `group_pipeline_enter`,
+`selector_scoring_enter`, and applied or unexpected result logs.
+
+For sparse-stat accuracy runs on Ascend, this is the recommended minimum
+configuration:
+
+```bash
+export TRIATTN_RUNTIME_FAST_RECENCY_ONLY=1
+export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
+export TRIATTN_RUNTIME_SPARSE_STATS_PATH=/path/to/stats.pt
+export TRIATTN_RUNTIME_LOGGING=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
+export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_DECISIONS=0
+export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
+export TRIATTN_RUNTIME_PERF_PROFILE=0
+export TRIATTN_RUNTIME_E2E_PROFILE=0
+export TRIATTN_RUNTIME_PHASE_PROFILE=0
+```
+
+With that configuration, `FAST_RECENCY_ONLY=1` no longer forces the
+Ascend zero-copy-only wait path when sparse stats and the accuracy guard are
+configured. After `worker_hook_enter`, the next core markers should be
+`group_pipeline_enter` and `selector_scoring_enter`. If a run still reports
+`zero_copy_recency_not_ready`, it is on the pure-recency path; confirm
+`TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1` and
+`TRIATTN_RUNTIME_SPARSE_STATS_PATH` are both visible to the worker process.
 
 For a long prompt on Ascend, it is normal to see skipped compression events with
 `reason=prefill_incomplete` during chunked prefill. The first real compression

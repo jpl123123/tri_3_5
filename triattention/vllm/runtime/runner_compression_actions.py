@@ -20,9 +20,19 @@ def execute_runner_compression_actions(
     log_worker_events: bool = True,
     logging_enabled: bool = True,
     log_execution_path: bool = False,
+    log_execution_path_core_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
+    noisy_skip_reasons = {
+        "under_budget",
+        "defer_recompress",
+        "batch_queue_dedup",
+        "prefill_incomplete",
+        "prefill_compression_limit",
+        "zero_copy_recency_not_ready",
+        "fast_recency_long_context_guard",
+    }
     for req_id, signal in signals.items():
         if not signal.should_compress:
             continue
@@ -67,7 +77,7 @@ def execute_runner_compression_actions(
                     }
                 )
                 continue
-        if log_execution_path:
+        if log_execution_path and not log_execution_path_core_only:
             logger.info(
                 "TRIATTN_EXEC_PATH runner_executor_enter req=%s step=%d "
                 "signal_reason=%s scheduled_tokens=%d estimated_cache_len=%d "
@@ -130,7 +140,11 @@ def execute_runner_compression_actions(
             )
             continue
 
-        if log_execution_path:
+        if log_execution_path and (
+            not log_execution_path_core_only
+            or result.applied
+            or result.reason not in noisy_skip_reasons
+        ):
             result_details = result.details if isinstance(result.details, dict) else {}
             selector_debug = result_details.get("selector_debug")
             execution_path = (
@@ -266,21 +280,10 @@ def execute_runner_compression_actions(
             step=signal.step,
         )
         details = result.details if isinstance(result.details, dict) else {}
-        skip_logger = (
-            logger.debug
-            if result.reason
-            in {
-                "under_budget",
-                "defer_recompress",
-                "batch_queue_dedup",
-                "prefill_incomplete",
-                "prefill_compression_limit",
-                "zero_copy_recency_not_ready",
-                "fast_recency_long_context_guard",
-            }
-            else logger.info
-        )
-        if logging_enabled:
+        skip_logger = logger.debug if result.reason in noisy_skip_reasons else logger.info
+        if logging_enabled and not (
+            log_execution_path_core_only and result.reason in noisy_skip_reasons
+        ):
             skip_logger(
                 "TriAttention compression skipped req=%s step=%d reason=%s "
                 "cache_len_after=%s details=%s",
