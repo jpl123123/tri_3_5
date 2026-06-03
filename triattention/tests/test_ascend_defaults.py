@@ -4,7 +4,7 @@ from triattention.vllm.runtime.ascend_defaults import (
 from triattention.vllm.runtime.config import TriAttentionRuntimeConfig
 
 
-def test_auto_fast_recency_enables_safe_ascend_zero_copy_defaults():
+def test_auto_fast_recency_keeps_sparse_scoring_default():
     config = TriAttentionRuntimeConfig(
         fast_recency_only=False,
         fast_recency_accuracy_guard=True,
@@ -13,8 +13,8 @@ def test_auto_fast_recency_enables_safe_ascend_zero_copy_defaults():
 
     apply_ascend_fast_recency_defaults(config, env={})
 
-    assert config.fast_recency_only
-    assert not config.fast_recency_accuracy_guard
+    assert not config.fast_recency_only
+    assert config.fast_recency_accuracy_guard
 
 
 def test_auto_fast_recency_respects_explicit_user_mode():
@@ -33,7 +33,7 @@ def test_auto_fast_recency_respects_explicit_user_mode():
     assert config.fast_recency_accuracy_guard
 
 
-def test_auto_fast_recency_overrides_stale_accuracy_guard():
+def test_auto_fast_recency_respects_accuracy_guard():
     config = TriAttentionRuntimeConfig(
         fast_recency_only=True,
         fast_recency_accuracy_guard=True,
@@ -44,6 +44,16 @@ def test_auto_fast_recency_overrides_stale_accuracy_guard():
         config,
         env={"TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD": "1"},
     )
+
+    assert config.fast_recency_only
+    assert config.fast_recency_accuracy_guard
+
+
+def test_explicit_fast_recency_from_env_defaults_guard_off(monkeypatch):
+    monkeypatch.setenv("TRIATTN_RUNTIME_FAST_RECENCY_ONLY", "1")
+    monkeypatch.delenv("TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD", raising=False)
+
+    config = TriAttentionRuntimeConfig.from_env()
 
     assert config.fast_recency_only
     assert not config.fast_recency_accuracy_guard
@@ -124,5 +134,5 @@ def test_auto_fast_recency_can_be_disabled_to_keep_accuracy_guard():
     assert config.fast_recency_accuracy_guard
 
 
-def test_early_install_proxy_on_ascend_defaults_to_lazy():
-    assert not TriAttentionRuntimeConfig().early_install_proxy_on_ascend
+def test_early_install_proxy_on_ascend_defaults_to_eager():
+    assert TriAttentionRuntimeConfig().early_install_proxy_on_ascend
