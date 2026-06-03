@@ -46,6 +46,55 @@ from .thresholds import (
 from .worker_reclaim_sync import apply_worker_block_reclaim_events
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _shape0(value: Any) -> int | None:
+    try:
+        return int(value.shape[0])
+    except Exception:
+        return None
+
+
+def _numel(value: Any) -> int | None:
+    try:
+        return int(value.numel())
+    except Exception:
+        try:
+            return int(value.size)
+        except Exception:
+            return None
+
+
+def _first_tensor_like(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if hasattr(item, "shape") or hasattr(item, "numel"):
+                return item
+    return value
+
+
 def _resolve_tensor_parallel_rank(base_runner: Any) -> int:
     try:
         from vllm.distributed import get_tensor_model_parallel_rank
@@ -71,6 +120,96 @@ def _resolve_tensor_parallel_rank(base_runner: Any) -> int:
             except Exception:
                 pass
     return 0
+
+
+def _module_forward_details(
+    *,
+    layer_idx: int,
+    kind: str,
+) -> Any:
+    def _details(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        result: Any,
+    ) -> dict[str, Any]:
+        first_arg = args[0] if args else None
+        hidden_states = _first_tensor_like(kwargs.get("hidden_states", first_arg))
+        result_tensor = _first_tensor_like(result)
+        return {
+            "layer": layer_idx,
+            "kind": kind,
+            "input_rows": _shape0(hidden_states),
+            "input_numel": _numel(hidden_states),
+            "result_rows": _shape0(result_tensor),
+            "result_numel": _numel(result_tensor),
+        }
+
+    return _details
+
+
+def _as_sequence(value: Any) -> list[Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        return [value[idx] for idx in range(len(value))]
+    except Exception:
+        return None
+
+
+def _resolve_model_layers(model: Any) -> list[Any]:
+    roots = [
+        model,
+        getattr(model, "model", None),
+        getattr(model, "decoder", None),
+        getattr(model, "transformer", None),
+    ]
+    for root in roots:
+        if root is None:
+            continue
+        for attr_name in ("layers", "h", "blocks"):
+            layers = _as_sequence(getattr(root, attr_name, None))
+            if layers:
+                return layers
+    return []
+
+
+def _parse_layer_probe_indices(raw: str, layer_count: int) -> set[int]:
+    indices: set[int] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            idx = int(item)
+        except Exception:
+            continue
+        if idx < 0:
+            idx = layer_count + idx
+        if 0 <= idx < layer_count:
+            indices.add(idx)
+    return indices
+
+
+def _select_layer_probe_indices(layer_count: int) -> list[int]:
+    if layer_count <= 0:
+        return []
+    explicit = os.environ.get("TRIATTN_RUNTIME_MODEL_PHASE_PROBE_LAYERS")
+    if explicit:
+        return sorted(_parse_layer_probe_indices(explicit, layer_count))
+    limit = max(0, _env_int("TRIATTN_RUNTIME_MODEL_PHASE_PROBE_LAYER_LIMIT", 4))
+    if limit <= 0:
+        return []
+    if layer_count <= limit:
+        return list(range(layer_count))
+    if limit == 1:
+        return [0]
+    selected = {
+        int(round(i * (layer_count - 1) / (limit - 1)))
+        for i in range(limit)
+    }
+    return sorted(idx for idx in selected if 0 <= idx < layer_count)
 
 
 class TriAttentionModelRunner:
@@ -103,6 +242,7 @@ class TriAttentionModelRunner:
         if bool(getattr(self.config, "preinstall_input_patch", True)):
             self._runtime_input_patch_installed = bool(install_runtime_input_patch())
         self._install_base_runner_phase_probes()
+        self._install_model_submodule_phase_probes()
         self._allowed_strict_skip_reasons = {
             "under_budget",
             "prefill_incomplete",
@@ -168,6 +308,78 @@ class TriAttentionModelRunner:
         if installed and bool(getattr(self._perf, "enabled", False)):
             self._logger.info(
                 "TriAttention installed base runner phase probes: %s",
+                ",".join(installed),
+            )
+
+    def _install_model_submodule_phase_probes(self) -> None:
+        """Attach sampled model/layer probes for Ascend forward bottleneck analysis."""
+
+        default_enabled = bool(getattr(self._perf, "enabled", False))
+        if not _env_bool("TRIATTN_RUNTIME_MODEL_PHASE_PROBES", default_enabled):
+            return
+        model = getattr(self._base_runner, "model", None)
+        layers = _resolve_model_layers(model)
+        selected_layers = _select_layer_probe_indices(len(layers))
+        if not selected_layers:
+            return
+
+        installed: list[str] = []
+
+        def _wrap_forward(target: Any, label: str, phase: str, layer_idx: int, kind: str) -> None:
+            original = getattr(target, "forward", None)
+            if not callable(original) or bool(
+                getattr(original, "_triattention_phase_timed", False)
+            ):
+                return
+            try:
+                setattr(
+                    target,
+                    "forward",
+                    make_timed_wrapper(
+                        phase,
+                        original,
+                        _module_forward_details(layer_idx=layer_idx, kind=kind),
+                    ),
+                )
+                installed.append(label)
+            except Exception:
+                return
+
+        for layer_idx in selected_layers:
+            layer = layers[layer_idx]
+            _wrap_forward(
+                layer,
+                f"layer[{layer_idx}].forward",
+                "model_layer_forward",
+                layer_idx,
+                "layer",
+            )
+            self_attn = getattr(layer, "self_attn", None)
+            if self_attn is None:
+                self_attn = getattr(layer, "attention", None)
+            if self_attn is not None:
+                _wrap_forward(
+                    self_attn,
+                    f"layer[{layer_idx}].self_attn.forward",
+                    "model_self_attn_forward",
+                    layer_idx,
+                    "self_attn",
+                )
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                mlp = getattr(layer, "feed_forward", None)
+            if mlp is not None:
+                _wrap_forward(
+                    mlp,
+                    f"layer[{layer_idx}].mlp.forward",
+                    "model_mlp_forward",
+                    layer_idx,
+                    "mlp",
+                )
+
+        if installed and bool(getattr(self._perf, "enabled", False)):
+            self._logger.info(
+                "TriAttention installed model submodule phase probes: %s",
                 ",".join(installed),
             )
 
