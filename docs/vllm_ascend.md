@@ -138,9 +138,25 @@ export TRIATTN_RUNTIME_PERF_LOG_EVERY=50
 ```
 
 `TRIATTN_RUNTIME_PERF_PROFILE=1` keeps the low-overhead aggregated
-`TRIATTN_PERF` counters enabled. Deeper per-phase runner and model probes are
-diagnostic-only and add Python wrapper overhead on the decode hot path, so they
-are now controlled separately. Enable them only while localizing a bottleneck:
+`TRIATTN_PERF` counters enabled. To localize end-to-end blocking time without
+installing method wrappers, enable the E2E profiler:
+
+```bash
+export TRIATTN_RUNTIME_E2E_PROFILE=1
+export TRIATTN_RUNTIME_E2E_LOG_EVERY=50
+```
+
+`TRIATTN_E2E_PERF` reports aggregated `top_total` and `top_avg` timing across
+the runner boundary, including state updates, compression actions,
+effective-length override preparation, base `execute_model`, execute-output
+event attachment, and `sample_tokens`. If `base_execute_model` dominates, the
+remaining bottleneck is inside the backend model runner rather than the
+TriAttention orchestration path.
+
+Deeper per-phase runner and model probes are diagnostic-only and add Python
+wrapper overhead on the decode hot path, so they are controlled separately.
+Enable them only after `TRIATTN_E2E_PERF` shows the backend runner itself is the
+blocking phase:
 
 ```bash
 export TRIATTN_RUNTIME_PHASE_PROFILE=1

@@ -28,12 +28,30 @@ def _env_int(name: str, default: int) -> int:
 
 
 @dataclass
+class _E2EPhaseStats:
+    calls: int = 0
+    total_ms: float = 0.0
+    max_ms: float = 0.0
+
+    def record(self, elapsed_ms: float) -> None:
+        self.calls += 1
+        self.total_ms += elapsed_ms
+        self.max_ms = max(self.max_ms, elapsed_ms)
+
+    @property
+    def avg_ms(self) -> float:
+        return self.total_ms / max(1, self.calls)
+
+
+@dataclass
 class TriAttentionPerfProfile:
     """Aggregates per-step timing counters with sparse logging."""
 
     logger: Any
     enabled: bool = False
     log_every_steps: int = 200
+    e2e_enabled: bool = False
+    e2e_log_every_steps: int = 200
     total_steps: int = 0
     steps_with_overrides: int = 0
     steps_with_trigger: int = 0
@@ -53,6 +71,11 @@ class TriAttentionPerfProfile:
     selector_statuses: Counter[str] = field(default_factory=Counter)
     reclaim_modes: Counter[str] = field(default_factory=Counter)
     cudagraph_modes: Counter[str] = field(default_factory=Counter)
+    e2e_steps: int = 0
+    e2e_samples: int = 0
+    e2e_phase_stats: dict[str, _E2EPhaseStats] = field(default_factory=dict)
+    e2e_last_step: dict[str, float] = field(default_factory=dict)
+    e2e_last_sample: dict[str, float] = field(default_factory=dict)
     sink_dir: str | None = None
 
     @classmethod
@@ -62,6 +85,14 @@ class TriAttentionPerfProfile:
             logger=logger,
             enabled=_env_enabled("TRIATTN_RUNTIME_PERF_PROFILE", "0"),
             log_every_steps=max(1, _env_int("TRIATTN_RUNTIME_PERF_LOG_EVERY", 200)),
+            e2e_enabled=_env_enabled("TRIATTN_RUNTIME_E2E_PROFILE", "0"),
+            e2e_log_every_steps=max(
+                1,
+                _env_int(
+                    "TRIATTN_RUNTIME_E2E_LOG_EVERY",
+                    max(1, _env_int("TRIATTN_RUNTIME_PERF_LOG_EVERY", 200)),
+                ),
+            ),
             sink_dir=sink_dir,
         )
 
@@ -194,6 +225,112 @@ class TriAttentionPerfProfile:
             runtime_mode = None
         if runtime_mode is not None:
             self.cudagraph_modes[str(runtime_mode)] += 1
+
+    def record_e2e_step(
+        self,
+        phases_ms: dict[str, float] | None,
+        *,
+        num_reqs: int | None = None,
+        total_tokens: int | None = None,
+        has_trigger: bool = False,
+        uses_overrides: bool = False,
+        pending_events: int = 0,
+    ) -> None:
+        if not self.e2e_enabled or not isinstance(phases_ms, dict):
+            return
+        self.e2e_steps += 1
+        self.e2e_last_step = {
+            name: float(elapsed)
+            for name, elapsed in phases_ms.items()
+            if isinstance(elapsed, (int, float))
+        }
+        for name, elapsed in self.e2e_last_step.items():
+            self.e2e_phase_stats.setdefault(name, _E2EPhaseStats()).record(elapsed)
+        if self.e2e_steps % self.e2e_log_every_steps == 0:
+            self._log_e2e_summary(
+                num_reqs=num_reqs,
+                total_tokens=total_tokens,
+                has_trigger=has_trigger,
+                uses_overrides=uses_overrides,
+                pending_events=pending_events,
+            )
+
+    def record_e2e_sample(
+        self,
+        phases_ms: dict[str, float] | None,
+        *,
+        pending_events: int = 0,
+    ) -> None:
+        if not self.e2e_enabled or not isinstance(phases_ms, dict):
+            return
+        self.e2e_samples += 1
+        self.e2e_last_sample = {
+            name: float(elapsed)
+            for name, elapsed in phases_ms.items()
+            if isinstance(elapsed, (int, float))
+        }
+        for name, elapsed in self.e2e_last_sample.items():
+            self.e2e_phase_stats.setdefault(name, _E2EPhaseStats()).record(elapsed)
+        if self.e2e_steps > 0 and self.e2e_steps % self.e2e_log_every_steps == 0:
+            self._log_e2e_summary(pending_events=pending_events)
+
+    def _format_e2e_phase(self, item: tuple[str, _E2EPhaseStats]) -> str:
+        name, stats = item
+        return (
+            f"{name}:calls={stats.calls},avg={stats.avg_ms:.2f},"
+            f"max={stats.max_ms:.2f},total={stats.total_ms:.2f}"
+        )
+
+    def _format_last_e2e(self, phases: dict[str, float]) -> str:
+        if not phases:
+            return "none"
+        top = sorted(phases.items(), key=lambda item: item[1], reverse=True)[:8]
+        return "|".join(f"{name}={elapsed:.2f}" for name, elapsed in top)
+
+    def _log_e2e_summary(
+        self,
+        *,
+        num_reqs: int | None = None,
+        total_tokens: int | None = None,
+        has_trigger: bool | None = None,
+        uses_overrides: bool | None = None,
+        pending_events: int | None = None,
+    ) -> None:
+        if not self.e2e_phase_stats:
+            return
+        top_total = sorted(
+            self.e2e_phase_stats.items(),
+            key=lambda item: item[1].total_ms,
+            reverse=True,
+        )[:8]
+        top_avg = sorted(
+            self.e2e_phase_stats.items(),
+            key=lambda item: item[1].avg_ms,
+            reverse=True,
+        )[:8]
+        line = (
+            "TRIATTN_E2E_PERF "
+            f"steps={self.e2e_steps} samples={self.e2e_samples} "
+            f"num_reqs={num_reqs if num_reqs is not None else 'na'} "
+            f"total_tokens={total_tokens if total_tokens is not None else 'na'} "
+            f"has_trigger={int(bool(has_trigger)) if has_trigger is not None else 'na'} "
+            f"uses_overrides={int(bool(uses_overrides)) if uses_overrides is not None else 'na'} "
+            f"pending_events={pending_events if pending_events is not None else 'na'} "
+            f"top_total={'|'.join(self._format_e2e_phase(item) for item in top_total)} "
+            f"top_avg={'|'.join(self._format_e2e_phase(item) for item in top_avg)} "
+            f"last_step={self._format_last_e2e(self.e2e_last_step)} "
+            f"last_sample={self._format_last_e2e(self.e2e_last_sample)}"
+        )
+        self.logger.info("%s", line)
+        if self.sink_dir:
+            try:
+                sink_dir = Path(self.sink_dir)
+                sink_dir.mkdir(parents=True, exist_ok=True)
+                sink_path = sink_dir / f"triattn_e2e_perf_{os.getpid()}.log"
+                with sink_path.open("a", encoding="utf-8") as fp:
+                    fp.write(line + "\n")
+            except Exception:
+                pass
 
 
 class _Timer:

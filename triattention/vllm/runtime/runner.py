@@ -864,26 +864,64 @@ class TriAttentionModelRunner:
         intermediate_tensors: Any = None,
     ) -> Any:
         perf_enabled = bool(getattr(self._perf, "enabled", False))
-        t_total = time.perf_counter() if perf_enabled else 0.0
-        t0 = time.perf_counter() if perf_enabled else 0.0
-        self._register_new_requests(scheduler_output)
-        self._cleanup_finished_requests(scheduler_output)
-        self._mark_preemptions(scheduler_output)
-        self._mark_resumed(scheduler_output)
-        signals = self._consume_signals(scheduler_output)
-        signals = self._supplement_worker_self_triggers(scheduler_output, signals)
-        t_state_ms = (time.perf_counter() - t0) * 1000.0 if perf_enabled else 0.0
-        t0 = time.perf_counter() if perf_enabled else 0.0
-        self._execute_compression_actions(scheduler_output, signals)
-        t_compress_ms = (time.perf_counter() - t0) * 1000.0 if perf_enabled else 0.0
-        self._perf.record_compression_events(self._pending_compression_events)
-        t0 = time.perf_counter() if perf_enabled else 0.0
-        self._apply_worker_block_reclaim_events()
-        self._patch_scheduler_output_for_compressed_reqs(scheduler_output)
-        t_reclaim_ms = (time.perf_counter() - t0) * 1000.0 if perf_enabled else 0.0
-        need_effective_overrides = self._needs_effective_input_overrides(scheduler_output)
-        self._ensure_runtime_input_patch_if_needed(need_effective_overrides)
-        bridge_perf: dict[str, float] | None = {} if perf_enabled else None
+        e2e_enabled = bool(getattr(self._perf, "e2e_enabled", False))
+        timed_enabled = perf_enabled or e2e_enabled
+        step_phases: dict[str, float] | None = {} if e2e_enabled else None
+
+        def _timed(name: str, fn: Any) -> Any:
+            if not e2e_enabled:
+                return fn()
+            t_phase = time.perf_counter()
+            try:
+                return fn()
+            finally:
+                assert step_phases is not None
+                step_phases[name] = (time.perf_counter() - t_phase) * 1000.0
+
+        t_total = time.perf_counter() if timed_enabled else 0.0
+        t0 = time.perf_counter() if timed_enabled else 0.0
+        _timed(
+            "register_new_requests",
+            lambda: self._register_new_requests(scheduler_output),
+        )
+        _timed(
+            "cleanup_finished_requests",
+            lambda: self._cleanup_finished_requests(scheduler_output),
+        )
+        _timed("mark_preemptions", lambda: self._mark_preemptions(scheduler_output))
+        _timed("mark_resumed", lambda: self._mark_resumed(scheduler_output))
+        signals = _timed("consume_signals", lambda: self._consume_signals(scheduler_output))
+        signals = _timed(
+            "supplement_worker_self_triggers",
+            lambda: self._supplement_worker_self_triggers(scheduler_output, signals),
+        )
+        t_state_ms = (time.perf_counter() - t0) * 1000.0 if timed_enabled else 0.0
+        t0 = time.perf_counter() if timed_enabled else 0.0
+        _timed(
+            "execute_compression_actions",
+            lambda: self._execute_compression_actions(scheduler_output, signals),
+        )
+        t_compress_ms = (time.perf_counter() - t0) * 1000.0 if timed_enabled else 0.0
+        _timed(
+            "record_compression_events",
+            lambda: self._perf.record_compression_events(self._pending_compression_events),
+        )
+        t0 = time.perf_counter() if timed_enabled else 0.0
+        _timed("apply_worker_block_reclaim_events", self._apply_worker_block_reclaim_events)
+        _timed(
+            "patch_scheduler_output_for_compressed_reqs",
+            lambda: self._patch_scheduler_output_for_compressed_reqs(scheduler_output),
+        )
+        t_reclaim_ms = (time.perf_counter() - t0) * 1000.0 if timed_enabled else 0.0
+        need_effective_overrides = _timed(
+            "needs_effective_input_overrides",
+            lambda: self._needs_effective_input_overrides(scheduler_output),
+        )
+        _timed(
+            "ensure_runtime_input_patch",
+            lambda: self._ensure_runtime_input_patch_if_needed(need_effective_overrides),
+        )
+        bridge_perf: dict[str, float] | None = {} if timed_enabled else None
         output = execute_base_model_with_effective_overrides(
             base_runner=self._base_runner,
             state_store=self.state_store,
@@ -893,8 +931,15 @@ class TriAttentionModelRunner:
             config=self.config,
             perf_out=bridge_perf,
         )
-        self._perf.record_model_output(output)
-        t_total_exec_ms = (time.perf_counter() - t_total) * 1000.0 if perf_enabled else 0.0
+        if e2e_enabled and step_phases is not None and bridge_perf is not None:
+            step_phases["override_prep"] = float(
+                bridge_perf.get("override_prep_ms", 0.0)
+            )
+            step_phases["base_execute_model"] = float(
+                bridge_perf.get("base_exec_ms", 0.0)
+            )
+        _timed("record_model_output", lambda: self._perf.record_model_output(output))
+        t_total_exec_ms = (time.perf_counter() - t_total) * 1000.0 if timed_enabled else 0.0
         has_trigger = any(bool(sig.should_compress) for sig in signals.values()) if signals else False
         self._perf.record_step(
             has_trigger=has_trigger,
@@ -906,21 +951,55 @@ class TriAttentionModelRunner:
             t_base_exec_ms=float((bridge_perf or {}).get("base_exec_ms", 0.0)),
             t_total_exec_ms=t_total_exec_ms,
         )
+        pending_before_attach = len(self._pending_compression_events)
+        t_attach_execute = time.perf_counter() if e2e_enabled else 0.0
         output, self._pending_compression_events = attach_execute_model_compression_events(
             output=output,
             pending_events=self._pending_compression_events,
             scheduler_output=scheduler_output,
         )
+        if e2e_enabled and step_phases is not None:
+            step_phases["attach_execute_model_events"] = (
+                time.perf_counter() - t_attach_execute
+            ) * 1000.0
+            step_phases["execute_model_total"] = (time.perf_counter() - t_total) * 1000.0
+            num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+            num_reqs = len(num_scheduled) if isinstance(num_scheduled, dict) else None
+            total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", None)
+            if total_tokens is None and isinstance(num_scheduled, dict):
+                try:
+                    total_tokens = sum(int(v) for v in num_scheduled.values())
+                except Exception:
+                    total_tokens = None
+            try:
+                total_tokens_i = int(total_tokens)
+            except Exception:
+                total_tokens_i = None
+            self._perf.record_e2e_step(
+                step_phases,
+                num_reqs=num_reqs,
+                total_tokens=total_tokens_i,
+                has_trigger=has_trigger,
+                uses_overrides=bool(need_effective_overrides),
+                pending_events=pending_before_attach,
+            )
         return output
 
     def sample_tokens(self, grammar_output: Any) -> Any:
         # In vLLM V1 async path, execute_model returns None and the actual
         # ModelRunnerOutput (with sampled_token_ids) is produced here.
         profile_enabled = phase_profile_enabled()
+        e2e_enabled = bool(getattr(self._perf, "e2e_enabled", False))
+        sample_phases: dict[str, float] | None = {} if e2e_enabled else None
         t0 = phase_now() if profile_enabled else 0.0
+        t_sample = time.perf_counter() if e2e_enabled else 0.0
         try:
             output = self._base_runner.sample_tokens(grammar_output)
         finally:
+            if e2e_enabled and sample_phases is not None:
+                sample_phases["base_sample_tokens"] = (
+                    time.perf_counter() - t_sample
+                ) * 1000.0
             if profile_enabled:
                 record_phase(
                     "base_runner_sample_tokens",
@@ -929,10 +1008,19 @@ class TriAttentionModelRunner:
                         "pending_events": len(self._pending_compression_events),
                     },
                 )
+        t_attach = time.perf_counter() if e2e_enabled else 0.0
         output, self._pending_compression_events = attach_sample_tokens_compression_events(
             output=output,
             pending_events=self._pending_compression_events,
         )
+        if e2e_enabled and sample_phases is not None:
+            sample_phases["attach_sample_tokens_events"] = (
+                time.perf_counter() - t_attach
+            ) * 1000.0
+            self._perf.record_e2e_sample(
+                sample_phases,
+                pending_events=len(self._pending_compression_events),
+            )
         return output
 
     def snapshot_states(self) -> dict[str, Any]:
