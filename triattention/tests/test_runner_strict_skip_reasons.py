@@ -129,6 +129,47 @@ def test_prefill_compression_limit_is_allowed_in_strict_mode():
     assert state_store.skipped["reason"] == "prefill_compression_limit"
 
 
+def test_initial_decode_grace_is_allowed_in_strict_mode():
+    state_store = _StateStore()
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=9864,
+        step=6,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=9863,
+        scheduled_tokens=1,
+    )
+
+    events = execute_runner_compression_actions(
+        executor=_Executor(reason="initial_decode_grace"),
+        state_store=state_store,
+        scheduler_output=object(),
+        signals={"req-1": signal},
+        strict_no_downgrade=True,
+        allowed_strict_skip_reasons={"initial_decode_grace"},
+        logger=_Logger(),
+        log_decisions=False,
+    )
+
+    assert events == [
+        {
+            "req_id": "req-1",
+            "step": 6,
+            "status": "skipped",
+            "reason": "initial_decode_grace",
+            "cache_len_after": 4096,
+            "details": {},
+            "scheduled_tokens": 1,
+            "estimated_cache_len": 9864,
+            "prefill_len": 9863,
+        }
+    ]
+    assert state_store.skipped["reason"] == "initial_decode_grace"
+
+
 def test_core_only_execution_path_suppresses_noisy_zero_copy_skip_logs():
     state_store = _StateStore()
     logger = _CollectingLogger()

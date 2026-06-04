@@ -33,6 +33,7 @@ def execute_runner_compression_actions(
         "prefill_compression_limit",
         "zero_copy_recency_not_ready",
         "fast_recency_long_context_guard",
+        "initial_decode_grace",
     }
     for req_id, signal in signals.items():
         if not signal.should_compress:

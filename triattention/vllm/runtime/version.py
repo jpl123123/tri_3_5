@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "remove-initial-decode-bypass-v25-20260604"
+RUNTIME_BUILD_ID = "hook-initial-decode-grace-v26-20260604"
 
 
 def runtime_build_info() -> str:

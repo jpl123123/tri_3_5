@@ -265,6 +265,7 @@ class TriAttentionModelRunner:
             "req_state_not_found",
             "batch_queue_dedup",
             "fast_recency_long_context_guard",
+            "initial_decode_grace",
             "zero_copy_recency_not_ready",
         }
 
