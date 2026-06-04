@@ -822,6 +822,10 @@ class TriAttentionModelRunner:
             logging_enabled=bool(self.config.logging_enabled),
             log_execution_path=bool(self._log_execution_path),
             log_execution_path_core_only=bool(self._log_execution_path_core_only),
+            log_selector_debug=bool(
+                self._log_execution_path
+                and getattr(self.config, "log_selector_debug", False)
+            ),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:

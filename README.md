@@ -263,6 +263,8 @@ For debugging, leave logging enabled and turn on only the streams you need:
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_DECISIONS=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=0
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=0
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_E2E_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
@@ -275,12 +277,24 @@ boundary and expected-skip logs, use:
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=0
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=0
 export TRIATTN_RUNTIME_LOG_DECISIONS=0
 export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
 export TRIATTN_RUNTIME_PERF_PROFILE=0
 export TRIATTN_RUNTIME_E2E_PROFILE=0
 export TRIATTN_RUNTIME_PHASE_PROFILE=0
 ```
+
+For one-off deep debugging of the selector and per-layer compaction path, add:
+
+```bash
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=1
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=1
+```
+
+These two switches can produce many INFO lines and large selector payloads on
+multi-rank runs, so keep them off for latency or throughput comparisons.
 
 ### Configuration Reference
 
@@ -290,6 +304,8 @@ export TRIATTN_RUNTIME_PHASE_PROFILE=0
 | `TRIATTN_RUNTIME_LOG_DECISIONS` | `true` | Emit scheduler/worker compression decisions when logging is enabled |
 | `TRIATTN_RUNTIME_LOG_EXECUTION_PATH` | `true` | Emit `TRIATTN_EXEC_PATH` markers that prove the request reached the TriAttention runner/hook path, including guard reasons before a hook is entered and selector/scoring markers after a real compression boundary |
 | `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY` | `false` | With execution-path logging enabled, suppress high-frequency boundary/context and expected-skip logs so core markers such as `hook_installed`, `worker_hook_enter`, `group_pipeline_enter`, `selector_scoring_enter`, and applied/unexpected results stand out |
+| `TRIATTN_RUNTIME_LOG_CORE_TRACE` | `false` | Emit verbose `TRIATTN_CORE_TRACE` enter/exit markers around the group pipeline, selector bridge, and compaction internals |
+| `TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG` | `false` | Include nested selector debug payloads such as score layer indices, group aggregation metadata, and selector path details in hook results/logs |
 | `TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS` | `false` | Emit compression event logs on every worker instead of rank 0 only when logging is enabled |
 | `TRIATTN_RUNTIME_PERF_PROFILE` | `false` | Emit aggregated `TRIATTN_PERF` counters when logging is enabled |
 | `TRIATTN_RUNTIME_E2E_PROFILE` | `false` | Emit aggregated `TRIATTN_E2E_PERF` counters when logging is enabled |

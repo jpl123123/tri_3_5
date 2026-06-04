@@ -36,6 +36,15 @@ def _core_trace_enabled(config: TriAttentionRuntimeConfig) -> bool:
     return bool(
         getattr(config, "logging_enabled", True)
         and getattr(config, "log_execution_path", True)
+        and getattr(config, "log_core_trace", False)
+    )
+
+
+def _selector_debug_enabled(config: TriAttentionRuntimeConfig) -> bool:
+    return bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+        and getattr(config, "log_selector_debug", False)
     )
 
 
@@ -156,10 +165,14 @@ def try_build_recency_tail_block_remap(
         block_reclaim_groups=reclaim_groups,
         mutable_block_ids_by_group=remapped_block_ids_by_group,
         reclaim_mode="remap_tail",
-        selector_debug={
-            "execution_path": "worker_hook>zero_copy_recency_tail",
-            "score_backend": "recency_only",
-        },
+        selector_debug=(
+            {
+                "execution_path": "worker_hook>zero_copy_recency_tail",
+                "score_backend": "recency_only",
+            }
+            if _selector_debug_enabled(config)
+            else None
+        ),
     )
 
 
@@ -186,6 +199,7 @@ def run_group_compaction_pipeline(
     expected_cache_len_after: int | None = None
     selection_mode = "fallback"
     block_reclaim_groups: list[ReclaimGroup] = []
+    selector_debug_enabled = _selector_debug_enabled(config)
     selector_debug_by_group: list[dict[str, Any]] = []
     step = int(getattr(signal, "step", 0))
     _core_trace(
@@ -318,27 +332,39 @@ def run_group_compaction_pipeline(
             raise
         prepared_layer_compactions = group_selection.tasks
         selection_mode = group_selection.selection_mode
-        _core_trace(
-            config,
-            "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
-            "tasks=%d selection_mode=%s selector_debug=%s",
-            req_id,
-            step,
-            int(gid),
-            len(prepared_layer_compactions),
-            group_selection.selection_mode,
-            group_selection.selector_debug,
-        )
-        selector_debug_by_group.append(
-            {
-                "gid": gid,
-                "selection_mode": str(group_selection.selection_mode),
-                "group_total_tokens": int(group_total_tokens),
-                "group_budget_total": int(group_budget_total),
-                "layer_count": len(prepared_layer_compactions),
-                "selector": group_selection.selector_debug,
-            }
-        )
+        if selector_debug_enabled:
+            _core_trace(
+                config,
+                "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+                "tasks=%d selection_mode=%s selector_debug=%s",
+                req_id,
+                step,
+                int(gid),
+                len(prepared_layer_compactions),
+                group_selection.selection_mode,
+                group_selection.selector_debug,
+            )
+            selector_debug_by_group.append(
+                {
+                    "gid": gid,
+                    "selection_mode": str(group_selection.selection_mode),
+                    "group_total_tokens": int(group_total_tokens),
+                    "group_budget_total": int(group_budget_total),
+                    "layer_count": len(prepared_layer_compactions),
+                    "selector": group_selection.selector_debug,
+                }
+            )
+        else:
+            _core_trace(
+                config,
+                "exit prepare_group_layer_compactions req=%s step=%d gid=%d "
+                "tasks=%d selection_mode=%s",
+                req_id,
+                step,
+                int(gid),
+                len(prepared_layer_compactions),
+                group_selection.selection_mode,
+            )
 
         _core_trace(
             config,
@@ -436,15 +462,19 @@ def run_group_compaction_pipeline(
         )
         return {"applied": False, "reason": "no_compactable_groups"}
 
+    selector_debug: dict[str, Any] | None = None
+    if selector_debug_enabled:
+        selector_debug = {
+            "execution_path": "worker_hook>group_pipeline>selector_hf>layout_compaction",
+            "groups": selector_debug_by_group,
+        }
+
     outcome = GroupPipelineOutcome(
         cache_len_after=int(cache_len_after),
         selection_mode=str(selection_mode),
         block_reclaim_groups=block_reclaim_groups,
         mutable_block_ids_by_group=mutable_block_ids_by_group,
-        selector_debug={
-            "execution_path": "worker_hook>group_pipeline>selector_hf>layout_compaction",
-            "groups": selector_debug_by_group,
-        },
+        selector_debug=selector_debug,
     )
     _core_trace(
         config,

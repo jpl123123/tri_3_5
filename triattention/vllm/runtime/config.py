@@ -69,6 +69,8 @@ class TriAttentionRuntimeConfig:
     log_decisions: bool = True
     log_execution_path: bool = True
     log_execution_path_core_only: bool = False
+    log_core_trace: bool = False
+    log_selector_debug: bool = False
     fail_on_effective_len_regression: bool = True
     effective_len_regression_ratio: float = 0.9
     effective_len_guard_divide_multiples: int = 2
@@ -179,6 +181,11 @@ class TriAttentionRuntimeConfig:
             "LOG_EXECUTION_PATH_CORE_ONLY",
             cls.log_execution_path_core_only,
         )
+        log_core_trace = maybe_bool("LOG_CORE_TRACE", cls.log_core_trace)
+        log_selector_debug = maybe_bool(
+            "LOG_SELECTOR_DEBUG",
+            cls.log_selector_debug,
+        )
         log_all_worker_events = maybe_bool(
             "LOG_ALL_WORKER_EVENTS",
             cls.log_all_worker_events,
@@ -187,9 +194,13 @@ class TriAttentionRuntimeConfig:
             log_decisions = False
             log_execution_path = False
             log_execution_path_core_only = False
+            log_core_trace = False
+            log_selector_debug = False
             log_all_worker_events = False
         if not log_execution_path:
             log_execution_path_core_only = False
+            log_core_trace = False
+            log_selector_debug = False
         fast_recency_only = maybe_bool("FAST_RECENCY_ONLY", cls.fast_recency_only)
         fast_recency_accuracy_guard_default = cls.fast_recency_accuracy_guard
         if (
@@ -232,6 +243,8 @@ class TriAttentionRuntimeConfig:
             log_decisions=log_decisions,
             log_execution_path=log_execution_path,
             log_execution_path_core_only=log_execution_path_core_only,
+            log_core_trace=log_core_trace,
+            log_selector_debug=log_selector_debug,
             fail_on_effective_len_regression=maybe_bool(
                 "FAIL_ON_EFFECTIVE_LEN_REGRESSION",
                 cls.fail_on_effective_len_regression,

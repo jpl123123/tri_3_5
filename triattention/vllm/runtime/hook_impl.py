@@ -69,6 +69,14 @@ def make_runner_compression_hook(
         log_execution_path
         and getattr(config, "log_execution_path_core_only", False)
     )
+    log_core_trace = bool(
+        log_execution_path
+        and getattr(config, "log_core_trace", False)
+    )
+    log_selector_debug = bool(
+        log_execution_path
+        and getattr(config, "log_selector_debug", False)
+    )
 
     if log_execution_path:
         _runtime_logger.info(
@@ -268,16 +276,17 @@ def make_runner_compression_hook(
                 "_triattention_active_signal_step",
                 int(getattr(signal, "step", 0)),
             )
-            _runtime_logger.info(
-                "TRIATTN_CORE_TRACE enter run_group_compaction_pipeline req=%s "
-                "step=%d groups=%d layers=%d effective_tokens=%d budget_total=%d",
-                req_id,
-                int(getattr(signal, "step", 0)),
-                len(group_tensors),
-                layer_count,
-                int(effective_tokens),
-                int(budget_total),
-            )
+            if log_core_trace:
+                _runtime_logger.info(
+                    "TRIATTN_CORE_TRACE enter run_group_compaction_pipeline req=%s "
+                    "step=%d groups=%d layers=%d effective_tokens=%d budget_total=%d",
+                    req_id,
+                    int(getattr(signal, "step", 0)),
+                    len(group_tensors),
+                    layer_count,
+                    int(effective_tokens),
+                    int(budget_total),
+                )
         pipeline_out = run_group_compaction_pipeline(
             req_id=req_id,
             signal=signal,
@@ -295,7 +304,7 @@ def make_runner_compression_hook(
             per_head_compact_fn=compact_request_kv_in_place_per_head,
             gather_dense_fn=gather_request_k_dense,
         )
-        if log_execution_path:
+        if log_core_trace:
             if isinstance(pipeline_out, dict):
                 _runtime_logger.info(
                     "TRIATTN_CORE_TRACE exit run_group_compaction_pipeline "
@@ -328,6 +337,7 @@ def make_runner_compression_hook(
 
         compressed_once.add(req_id)
         if log_execution_path:
+            selector_debug = pipeline_out.selector_debug if log_selector_debug else None
             _runtime_logger.info(
                 "TRIATTN_EXEC_PATH group_pipeline_result req=%s step=%d "
                 "applied=True selection_mode=%s cache_len_after=%d selector_debug=%s",
@@ -335,7 +345,7 @@ def make_runner_compression_hook(
                 int(getattr(signal, "step", 0)),
                 pipeline_out.selection_mode,
                 int(pipeline_out.cache_len_after),
-                pipeline_out.selector_debug,
+                selector_debug,
             )
         return finalize_hook_placement_result(
             req_state=req_state,

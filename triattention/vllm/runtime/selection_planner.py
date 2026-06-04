@@ -61,6 +61,15 @@ def _core_trace_enabled(config: TriAttentionRuntimeConfig) -> bool:
     return bool(
         getattr(config, "logging_enabled", True)
         and getattr(config, "log_execution_path", True)
+        and getattr(config, "log_core_trace", False)
+    )
+
+
+def _selector_debug_enabled(config: TriAttentionRuntimeConfig) -> bool:
+    return bool(
+        getattr(config, "logging_enabled", True)
+        and getattr(config, "log_execution_path", True)
+        and getattr(config, "log_selector_debug", False)
     )
 
 
@@ -74,7 +83,13 @@ def _core_trace(
     _runtime_logger.info("TRIATTN_CORE_TRACE " + message, *args)
 
 
-def _extract_selector_debug(result: dict[str, Any] | None) -> dict[str, Any] | None:
+def _extract_selector_debug(
+    result: dict[str, Any] | None,
+    *,
+    config: TriAttentionRuntimeConfig,
+) -> dict[str, Any] | None:
+    if not _selector_debug_enabled(config):
+        return None
     if not isinstance(result, dict):
         return None
     debug: dict[str, Any] = {}
@@ -497,7 +512,10 @@ def prepare_group_layer_compactions(
             )
 
         keep_plan = KeepPlan.from_selector_result(selected)
-        selector_debug = _extract_selector_debug(selected) or selector_debug
+        selector_debug = _extract_selector_debug(
+            selected,
+            config=config,
+        ) or selector_debug
         keep_plan = _maybe_override_first_keep_plan(
             keep_plan=keep_plan,
             req_id=req_id,
@@ -532,14 +550,25 @@ def prepare_group_layer_compactions(
         selection_mode=str(selection_mode),
         selector_debug=selector_debug,
     )
-    _core_trace(
-        config,
-        "exit prepare_group_layer_compactions req=%s gid=%d tasks=%d "
-        "selection_mode=%s selector_debug=%s",
-        req_id,
-        int(gid),
-        len(result.tasks),
-        result.selection_mode,
-        result.selector_debug,
-    )
+    if _selector_debug_enabled(config):
+        _core_trace(
+            config,
+            "exit prepare_group_layer_compactions req=%s gid=%d tasks=%d "
+            "selection_mode=%s selector_debug=%s",
+            req_id,
+            int(gid),
+            len(result.tasks),
+            result.selection_mode,
+            result.selector_debug,
+        )
+    else:
+        _core_trace(
+            config,
+            "exit prepare_group_layer_compactions req=%s gid=%d tasks=%d "
+            "selection_mode=%s",
+            req_id,
+            int(gid),
+            len(result.tasks),
+            result.selection_mode,
+        )
     return result

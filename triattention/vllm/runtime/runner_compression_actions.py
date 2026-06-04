@@ -21,6 +21,7 @@ def execute_runner_compression_actions(
     logging_enabled: bool = True,
     log_execution_path: bool = False,
     log_execution_path_core_only: bool = False,
+    log_selector_debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
@@ -185,7 +186,7 @@ def execute_runner_compression_actions(
             reclaimed_block_count = details.get("reclaimed_block_count")
             recent_unabsorbed_tokens = details.get("recent_unabsorbed_tokens")
             selector_status = details.get("selector_status")
-            selector_debug = details.get("selector_debug")
+            selector_debug = details.get("selector_debug") if log_selector_debug else None
             block_reclaim = details.get("block_reclaim")
             reclaim_mode = (
                 block_reclaim.get("mode")

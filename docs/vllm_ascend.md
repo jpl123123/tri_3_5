@@ -109,6 +109,8 @@ For debugging, enable the master switch and only the streams needed for the run:
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_DECISIONS=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=0
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=0
 export TRIATTN_RUNTIME_PERF_PROFILE=1
 export TRIATTN_RUNTIME_E2E_PROFILE=1
 export TRIATTN_RUNTIME_PHASE_PROFILE=1
@@ -121,12 +123,25 @@ use:
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=0
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=0
 export TRIATTN_RUNTIME_LOG_DECISIONS=0
 export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
 export TRIATTN_RUNTIME_PERF_PROFILE=0
 export TRIATTN_RUNTIME_E2E_PROFILE=0
 export TRIATTN_RUNTIME_PHASE_PROFILE=0
 ```
+
+When a single reproduction needs the full selector/compaction trace, opt into
+the expensive streams explicitly:
+
+```bash
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=1
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=1
+```
+
+Leave those off for performance runs. They can serialize per-layer lists and
+nested selector payloads once per worker/rank.
 
 ## Expected Logs
 
@@ -156,7 +171,8 @@ also emits `TRIATTN_EXEC_PATH` markers. Look for the sequence
 `runner_execute_model_compression_boundary`, `worker_hook_enter`,
 `group_pipeline_enter`, and `selector_scoring_enter`; the selector marker
 prints `backend=torch` on Ascend and `trig_enabled=True` when the sparse
-TriAttention trigonometric scoring path is active.
+TriAttention trigonometric scoring path is active. It prints layer counts
+instead of full layer lists unless selector debug is explicitly enabled.
 
 If no real compression boundary is reached because a safety guard suppresses
 the trigger, the runner emits `TRIATTN_EXEC_PATH runner_trigger_guard` with the
@@ -178,6 +194,8 @@ With `TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1`, high-frequency
 The important markers remain: `hook_installed`, `runner_trigger_guard`,
 `worker_hook_enter`, `zero_copy_tail_enter`, `group_pipeline_enter`,
 `selector_scoring_enter`, and applied or unexpected result logs.
+Verbose `TRIATTN_CORE_TRACE` enter/exit logs remain off unless
+`TRIATTN_RUNTIME_LOG_CORE_TRACE=1` is set.
 
 For sparse-stat accuracy runs on Ascend, this is the recommended minimum
 configuration:
@@ -187,6 +205,8 @@ export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
 export TRIATTN_RUNTIME_LOGGING=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=1
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH_CORE_ONLY=1
+export TRIATTN_RUNTIME_LOG_CORE_TRACE=0
+export TRIATTN_RUNTIME_LOG_SELECTOR_DEBUG=0
 export TRIATTN_RUNTIME_LOG_DECISIONS=0
 export TRIATTN_RUNTIME_LOG_ALL_WORKER_EVENTS=0
 export TRIATTN_RUNTIME_PERF_PROFILE=0

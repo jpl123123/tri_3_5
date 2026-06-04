@@ -215,6 +215,14 @@ def build_triattention_selector(
         getattr(config, "logging_enabled", True)
         and getattr(config, "log_execution_path", True)
     )
+    log_core_trace = bool(
+        log_execution_path
+        and getattr(config, "log_core_trace", False)
+    )
+    log_selector_debug = bool(
+        log_execution_path
+        and getattr(config, "log_selector_debug", False)
+    )
 
     tri_cfg_kwargs: dict[str, Any] = {}
     if effective_device is not None:
@@ -769,10 +777,11 @@ def build_triattention_selector(
     ) -> None:
         if not log_execution_path:
             return
+        layer_count = len(layer_indices) if layer_indices is not None else None
         _runtime_logger.info(
             "TRIATTN_EXEC_PATH selector_scoring_enter req=%s gid=%s layer=%s "
             "mode=%s backend=%s total_tokens=%d budget_total=%d round_start=%d "
-            "chunk_tokens=%d trig_enabled=%s normalize=%s layers=%s",
+            "chunk_tokens=%d trig_enabled=%s normalize=%s layer_count=%s",
             req_id,
             gid,
             layer_idx,
@@ -784,7 +793,7 @@ def build_triattention_selector(
             int(chunk_tokens),
             not bool(getattr(config, "disable_trig", False)),
             bool(getattr(config, "sparse_normalize_scores", False)),
-            layer_indices,
+            layer_count,
         )
 
     def _keep_count_for_log(mode: str, indices: Any) -> int:
@@ -817,11 +826,13 @@ def build_triattention_selector(
         reason: str | None = None,
         layer_indices: list[int] | None = None,
     ) -> None:
-        if not log_execution_path:
+        if not log_core_trace:
             return
+        layer_count = len(layer_indices) if layer_indices is not None else None
         _runtime_logger.info(
             "TRIATTN_CORE_TRACE exit selector_scoring req=%s gid=%s layer=%s "
-            "mode=%s backend=%s result_mode=%s keep_count=%s reason=%s layers=%s",
+            "mode=%s backend=%s result_mode=%s keep_count=%s reason=%s "
+            "layer_count=%s",
             req_id,
             gid,
             layer_idx,
@@ -830,7 +841,7 @@ def build_triattention_selector(
             result_mode,
             keep_count,
             reason,
-            layer_indices,
+            layer_count,
         )
 
     def _selector_debug(
@@ -841,6 +852,8 @@ def build_triattention_selector(
         layer_indices: list[int] | None = None,
         total_layer_count: int | None = None,
     ) -> dict[str, Any]:
+        if not log_selector_debug:
+            return {}
         debug = {
             "debug_execution_path": execution_path,
             "debug_score_backend": score_backend_name,
@@ -1625,8 +1638,6 @@ def build_triattention_selector(
                 "indices": keep_per_head,
                 "semantic": "hf_aligned_global_per_head",
                 "group_agg_mode": group_agg_mode,
-                "debug_group_layer_indices": prepared_layer_indices,
-                "debug_group_layer_count_total": total_layer_entries,
                 **_selector_debug(
                     execution_path="selector_hf>paged_global_per_head>triattention_scoring",
                     total_tokens=total_tokens,
@@ -1635,6 +1646,13 @@ def build_triattention_selector(
                     total_layer_count=total_layer_entries,
                 ),
             }
+            if log_selector_debug:
+                result.update(
+                    {
+                        "debug_group_layer_indices": prepared_layer_indices,
+                        "debug_group_layer_count_total": total_layer_entries,
+                    }
+                )
             _log_selector_scoring_exit(
                 req_id=req_id,
                 gid=gid,
@@ -1720,8 +1738,6 @@ def build_triattention_selector(
                 "indices": keep_per_head,
                 "semantic": "hf_aligned_global_per_head",
                 "group_agg_mode": "mean",
-                "debug_group_layer_indices": dense_layer_indices,
-                "debug_group_layer_count_total": len(dense_layer_indices),
                 **_selector_debug(
                     execution_path="selector_hf>dense_global_per_head>triattention_scoring",
                     total_tokens=total_tokens,
@@ -1730,6 +1746,13 @@ def build_triattention_selector(
                     total_layer_count=len(dense_layer_indices),
                 ),
             }
+            if log_selector_debug:
+                result.update(
+                    {
+                        "debug_group_layer_indices": dense_layer_indices,
+                        "debug_group_layer_count_total": len(dense_layer_indices),
+                    }
+                )
             _log_selector_scoring_exit(
                 req_id=req_id,
                 gid=gid,
