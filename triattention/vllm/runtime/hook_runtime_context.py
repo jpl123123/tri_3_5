@@ -12,7 +12,6 @@ from .request_key_compat import get_scheduled_token_items
 from .signals import CompressionSignal
 from .thresholds import (
     compression_reclaim_interval_tokens,
-    should_defer_initial_decode_compression,
 )
 
 
@@ -225,19 +224,6 @@ def build_hook_runtime_context(
         and prefill_compression_count
         >= int(getattr(config, "prefill_max_compressions_on_ascend", 1) or 0)
     )
-    initial_decode_grace_hit = (
-        config.enable_experimental_kv_compaction
-        and should_defer_initial_decode_compression(
-            config=config,
-            effective_tokens=estimated_effective_tokens,
-            prefill_len=prefill_len,
-            is_ascend=is_ascend,
-            is_prefill_step=is_prefill_step,
-            compressed_once=bool(prefill_compression_count)
-            or req_id in compressed_once,
-        )
-    )
-
     if (
         config.fail_on_effective_len_regression
         and config.enable_experimental_block_reclaim
@@ -270,7 +256,6 @@ def build_hook_runtime_context(
     should_defer_recompress = (
         defer_for_prefill
         or prefill_limit_hit
-        or initial_decode_grace_hit
         or (
             config.enable_experimental_kv_compaction
             and req_id in compressed_once
@@ -283,8 +268,6 @@ def build_hook_runtime_context(
         defer_reason = "prefill_incomplete"
     elif prefill_limit_hit:
         defer_reason = "prefill_compression_limit"
-    elif initial_decode_grace_hit:
-        defer_reason = "initial_decode_grace"
     return HookRuntimeContext(
         scheduled_tokens=int(scheduled_tokens),
         num_computed_tokens=int(num_computed_tokens),

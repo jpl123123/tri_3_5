@@ -30,7 +30,7 @@ def _signal():
     )
 
 
-def test_initial_decode_grace_defers_first_ascend_decode_hook():
+def test_first_ascend_decode_hook_keeps_core_entry():
     signal = CompressionSignal(
         req_id="req-1",
         should_compress=True,
@@ -48,7 +48,6 @@ def test_initial_decode_grace_defers_first_ascend_decode_hook():
         config=TriAttentionRuntimeConfig(
             enable_experimental_kv_compaction=True,
             defer_prefill_compression_on_ascend=False,
-            min_decode_tokens_before_compress_on_ascend=2048,
         ),
         req_id="req-1",
         req_state=SimpleNamespace(num_computed_tokens=9863, block_ids=[[1] * 80]),
@@ -67,8 +66,8 @@ def test_initial_decode_grace_defers_first_ascend_decode_hook():
         block_size_hint=128,
     )
 
-    assert context.should_defer_recompress
-    assert context.defer_reason == "initial_decode_grace"
+    assert not context.should_defer_recompress
+    assert context.defer_reason is None
 
 
 def test_prefill_phase_uses_scheduler_new_reqs():

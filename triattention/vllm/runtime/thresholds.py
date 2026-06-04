@@ -98,57 +98,6 @@ def compression_reclaim_interval_tokens(
     return max(1, int(config.divide_length), min_reclaim_tokens)
 
 
-def initial_decode_compression_grace_tokens(
-    config: TriAttentionRuntimeConfig,
-    *,
-    is_ascend: bool,
-) -> int:
-    grace_tokens = max(
-        0,
-        int(getattr(config, "min_decode_tokens_before_compress", 0) or 0),
-    )
-    if is_ascend:
-        grace_tokens = max(
-            grace_tokens,
-            max(
-                0,
-                int(
-                    getattr(
-                        config,
-                        "min_decode_tokens_before_compress_on_ascend",
-                        0,
-                    )
-                    or 0
-                ),
-            ),
-        )
-    return grace_tokens
-
-
-def should_defer_initial_decode_compression(
-    *,
-    config: TriAttentionRuntimeConfig,
-    effective_tokens: int,
-    prefill_len: int,
-    is_ascend: bool,
-    is_prefill_step: bool,
-    compressed_once: bool,
-) -> bool:
-    if compressed_once or is_prefill_step:
-        return False
-    prefill_len_i = max(0, int(prefill_len or 0))
-    if prefill_len_i <= 0:
-        return False
-    grace_tokens = initial_decode_compression_grace_tokens(
-        config,
-        is_ascend=is_ascend,
-    )
-    if grace_tokens <= 0:
-        return False
-    decoded_after_prefill = max(0, int(effective_tokens or 0) - prefill_len_i)
-    return decoded_after_prefill < grace_tokens
-
-
 def compression_length_threshold(
     config: TriAttentionRuntimeConfig,
     *,

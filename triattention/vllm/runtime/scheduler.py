@@ -29,7 +29,6 @@ from .signals import CompressionSignal
 from .thresholds import (
     compression_length_threshold,
     is_ascend_environment_available,
-    should_defer_initial_decode_compression,
 )
 from .version import RUNTIME_BUILD_ID
 
@@ -158,7 +157,6 @@ class TriAttentionScheduler(Scheduler):
                 "kv_usage_trigger_enabled=%s block_reclaim_enabled=%s "
                 "defer_prefill_on_ascend=%s score_max_layers=%d "
                 "score_max_layers_on_ascend=%d "
-                "min_decode_tokens_before_compress_on_ascend=%d "
                 "prefill_min_reclaim_blocks_on_ascend=%d "
                 "prefill_max_compressions_on_ascend=%d "
                 "fast_recency_only=%s fast_recency_accuracy_guard=%s "
@@ -177,7 +175,6 @@ class TriAttentionScheduler(Scheduler):
                 self.triattention_config.defer_prefill_compression_on_ascend,
                 self.triattention_config.score_max_layers,
                 self.triattention_config.score_max_layers_on_ascend,
-                self.triattention_config.min_decode_tokens_before_compress_on_ascend,
                 self.triattention_config.prefill_min_reclaim_blocks_on_ascend,
                 self.triattention_config.prefill_max_compressions_on_ascend,
                 self.triattention_config.fast_recency_only,
@@ -432,22 +429,6 @@ class TriAttentionScheduler(Scheduler):
                 # num_computed_tokens, so avoid tracker writes in the decode hot path.
                 effective_base_len = request.num_computed_tokens
             estimated_cache_len = effective_base_len + scheduled_tokens_i
-            if (
-                not has_override
-                and should_defer_initial_decode_compression(
-                    config=self.triattention_config,
-                    effective_tokens=estimated_cache_len,
-                    prefill_len=prefill_len,
-                    is_ascend=(
-                        _is_ascend_scheduler_instance(self)
-                        or is_ascend_environment_available()
-                    ),
-                    is_prefill_step=is_prefill_step,
-                    compressed_once=False,
-                )
-            ):
-                continue
-
             if not has_override:
                 if compression_disabled and not kv_usage_enabled:
                     continue
