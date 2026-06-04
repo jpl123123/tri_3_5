@@ -236,15 +236,15 @@ the full prompt length.
 
 ## Performance Tuning
 
-On Ascend, the default path keeps sparse-stat per-head selection and all-layer
-scoring so the selected KV set matches the reference sparse path. The runtime
-still avoids the expensive full `[kept + dropped]` KV rewrite when tail blocks
-are physically reclaimed. For latency-sensitive serving after validating output
-quality, try:
+On Ascend, the default path keeps sparse-stat per-head selection and caps
+scoring to 8 sampled layers by default so sparse selection does not dominate
+decode latency. The runtime still avoids the expensive full `[kept + dropped]`
+KV rewrite when tail blocks are physically reclaimed. For latency-sensitive
+serving after validating output quality, try:
 
 ```bash
 export TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND=8
-export TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND=8
+export TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND=16
 export TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND=32
 export TRIATTN_RUNTIME_PREFILL_MAX_COMPRESSIONS_ON_ASCEND=1
 export TRIATTN_RUNTIME_SPARSE_NORMALIZE_SCORES=0
@@ -284,17 +284,18 @@ Phase logs include `model_top_total` and `model_top_avg` when model submodule
 probes are installed. Use those fields to distinguish a layer, attention, or
 MLP hotspot after `ascend_v1_model_forward` dominates the backend runner.
 
-`TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` defaults to `0`, which means score
-all layers. It is used only when `TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set
-`SCORE_MAX_LAYERS` explicitly to force a value for every backend. Use `8` as
-the conservative first latency setting, then try `4` if quality is stable. The
-runtime log will include
+`TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` now has an effective Ascend default
+of `8`. It is used only when `TRIATTN_RUNTIME_SCORE_MAX_LAYERS=0`. Set
+`SCORE_MAX_LAYERS` explicitly to force a value for every backend. Set the
+Ascend value to `0` explicitly to score all layers, or try `4` if quality is
+stable and latency still needs more headroom. The runtime log will include
 `selector_status=enabled:torch:tp=...:score_layers=max8,stride1`.
 
 `TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND` prevents very small compactions
-such as `2175 -> 2048` from running on NPU. With `--block-size 128`, the default
-`8` means compression waits until it can reclaim about 1024 KV tokens, which
-better amortizes scoring, KV movement, and scheduler/worker synchronization.
+such as `2175 -> 2048` from running on NPU. With `--block-size 128`, the sparse
+default `16` means compression waits until it can reclaim about 2048 KV tokens,
+which better amortizes scoring, KV movement, and scheduler/worker
+synchronization. Pure fast-recency keeps the cheaper `8` block interval.
 
 `TRIATTN_RUNTIME_PREFILL_MIN_RECLAIM_BLOCKS_ON_ASCEND` applies only to
 scheduled prefill chunks. The default `32` requires roughly 4096 reclaimable KV

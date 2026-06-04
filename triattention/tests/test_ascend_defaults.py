@@ -15,6 +15,9 @@ def test_auto_fast_recency_keeps_sparse_scoring_default():
 
     assert not config.fast_recency_only
     assert config.fast_recency_accuracy_guard
+    assert config.score_max_layers == 8
+    assert config.score_max_layers_on_ascend == 8
+    assert config.min_reclaim_blocks_on_ascend == 16
 
 
 def test_auto_fast_recency_respects_explicit_user_mode():
@@ -141,6 +144,54 @@ def test_auto_fast_recency_respects_explicit_score_layer_env():
 
     assert config.score_max_layers == 4
     assert config.score_max_layers_on_ascend == 4
+
+
+def test_sparse_ascend_defaults_respect_explicit_score_layer_env():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=False,
+        auto_fast_recency_on_ascend=True,
+        score_max_layers=0,
+        score_max_layers_on_ascend=4,
+    )
+
+    apply_ascend_fast_recency_defaults(
+        config,
+        env={"TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND": "4"},
+    )
+
+    assert config.score_max_layers == 4
+    assert config.score_max_layers_on_ascend == 4
+
+
+def test_sparse_ascend_defaults_respect_explicit_reclaim_env():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=False,
+        auto_fast_recency_on_ascend=True,
+        min_reclaim_blocks_on_ascend=8,
+    )
+
+    apply_ascend_fast_recency_defaults(
+        config,
+        env={"TRIATTN_RUNTIME_MIN_RECLAIM_BLOCKS_ON_ASCEND": "8"},
+    )
+
+    assert config.min_reclaim_blocks_on_ascend == 8
+
+
+def test_sparse_ascend_defaults_can_be_disabled():
+    config = TriAttentionRuntimeConfig(
+        fast_recency_only=False,
+        auto_fast_recency_on_ascend=False,
+        score_max_layers=0,
+        score_max_layers_on_ascend=0,
+        min_reclaim_blocks_on_ascend=8,
+    )
+
+    apply_ascend_fast_recency_defaults(config, env={})
+
+    assert config.score_max_layers == 0
+    assert config.score_max_layers_on_ascend == 0
+    assert config.min_reclaim_blocks_on_ascend == 8
 
 
 def test_auto_fast_recency_overrides_stale_reclaim_interval():
