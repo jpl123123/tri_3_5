@@ -11,7 +11,7 @@ class _Logger:
         raise AssertionError("profile logging should be disabled")
 
 
-def test_runtime_logging_defaults_keep_existing_decision_logs(monkeypatch):
+def test_runtime_logging_defaults_keep_decision_logs_but_quiet_exec_path(monkeypatch):
     monkeypatch.delenv("TRIATTN_RUNTIME_LOGGING", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_LOG_DECISIONS", raising=False)
     monkeypatch.delenv("TRIATTN_RUNTIME_LOG_EXECUTION_PATH", raising=False)
@@ -24,7 +24,7 @@ def test_runtime_logging_defaults_keep_existing_decision_logs(monkeypatch):
 
     assert config.logging_enabled
     assert config.log_decisions
-    assert config.log_execution_path
+    assert not config.log_execution_path
     assert not config.log_execution_path_core_only
     assert not config.log_core_trace
     assert not config.log_selector_debug

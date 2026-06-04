@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "ascend-initial-decode-grace-v23-20260604"
+RUNTIME_BUILD_ID = "quiet-exec-path-default-v24-20260604"
 
 
 def runtime_build_info() -> str:

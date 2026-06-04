@@ -31,6 +31,7 @@ def test_runner_trigger_guard_marks_pre_core_skip():
     logger = _Logger()
     runner = object.__new__(TriAttentionModelRunner)
     runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
     runner._logged_execution_path_trigger_guards = set()
     runner._last_step = 11
     runner._logger = logger
@@ -54,6 +55,24 @@ def test_runner_trigger_guard_marks_pre_core_skip():
     assert "reason=fast_recency_long_context_guard" in line
     assert "core_entered=False" in line
     assert "hint=set_sparse_stats_path_or_disable_long_context_guard" in line
+
+
+def test_runner_trigger_guard_suppressed_for_core_only_logging():
+    logger = _Logger()
+    runner = object.__new__(TriAttentionModelRunner)
+    runner._log_execution_path = True
+    runner._log_execution_path_core_only = True
+    runner._logged_execution_path_trigger_guards = set()
+    runner._last_step = 11
+    runner._logger = logger
+
+    runner._log_execution_path_trigger_guard(
+        req_id="req-1",
+        reason="initial_decode_grace",
+        prefill_len=9863,
+    )
+
+    assert logger.lines == []
 
 
 class _AscendRunner:
@@ -98,6 +117,7 @@ def test_runner_drops_existing_signal_during_initial_decode_grace():
     runner._last_step = 6
     runner._logger = logger
     runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
     runner._logged_execution_path_trigger_guards = set()
     runner._get_actual_kv_from_block_table = lambda req_id: 9864
 

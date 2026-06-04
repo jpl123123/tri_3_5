@@ -548,6 +548,8 @@ class TriAttentionModelRunner:
     ) -> None:
         if not self._log_execution_path:
             return
+        if self._log_execution_path_core_only:
+            return
         key = (req_id, reason)
         if key in self._logged_execution_path_trigger_guards:
             return

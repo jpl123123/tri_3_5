@@ -67,7 +67,7 @@ class TriAttentionRuntimeConfig:
     require_physical_reclaim: bool = True
     logging_enabled: bool = True
     log_decisions: bool = True
-    log_execution_path: bool = True
+    log_execution_path: bool = False
     log_execution_path_core_only: bool = False
     log_core_trace: bool = False
     log_selector_debug: bool = False
