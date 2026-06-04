@@ -10,7 +10,10 @@ from .constants import TRITON_SCORING_REQUIRED_MARKER
 from .prefill_phase import is_prefill_phase_for_limit
 from .request_key_compat import get_scheduled_token_items
 from .signals import CompressionSignal
-from .thresholds import compression_reclaim_interval_tokens
+from .thresholds import (
+    compression_reclaim_interval_tokens,
+    should_defer_initial_decode_compression,
+)
 
 
 def effective_budget_for_signal(
@@ -222,6 +225,18 @@ def build_hook_runtime_context(
         and prefill_compression_count
         >= int(getattr(config, "prefill_max_compressions_on_ascend", 1) or 0)
     )
+    initial_decode_grace_hit = (
+        config.enable_experimental_kv_compaction
+        and should_defer_initial_decode_compression(
+            config=config,
+            effective_tokens=estimated_effective_tokens,
+            prefill_len=prefill_len,
+            is_ascend=is_ascend,
+            is_prefill_step=is_prefill_step,
+            compressed_once=bool(prefill_compression_count)
+            or req_id in compressed_once,
+        )
+    )
 
     if (
         config.fail_on_effective_len_regression
@@ -252,17 +267,24 @@ def build_hook_runtime_context(
     )
     length_gate_hit = estimated_effective_tokens >= local_length_threshold
     kv_override = str(getattr(signal, "reason", "")) == "kv_usage_threshold"
-    should_defer_recompress = defer_for_prefill or prefill_limit_hit or (
-        config.enable_experimental_kv_compaction
-        and req_id in compressed_once
-        and not kv_override
-        and not length_gate_hit
+    should_defer_recompress = (
+        defer_for_prefill
+        or prefill_limit_hit
+        or initial_decode_grace_hit
+        or (
+            config.enable_experimental_kv_compaction
+            and req_id in compressed_once
+            and not kv_override
+            and not length_gate_hit
+        )
     )
     defer_reason = None
     if defer_for_prefill:
         defer_reason = "prefill_incomplete"
     elif prefill_limit_hit:
         defer_reason = "prefill_compression_limit"
+    elif initial_decode_grace_hit:
+        defer_reason = "initial_decode_grace"
     return HookRuntimeContext(
         scheduled_tokens=int(scheduled_tokens),
         num_computed_tokens=int(num_computed_tokens),

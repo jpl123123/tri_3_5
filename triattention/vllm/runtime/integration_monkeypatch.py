@@ -118,11 +118,20 @@ def _patched_scheduler_init(self, *args, **kwargs):
         logger.info(
             "TriAttention monkeypatched Scheduler initialized: budget=%d divide_length=%d "
             "min_reclaim_blocks_on_ascend=%d protect_prefill=%s "
+            "min_decode_tokens_before_compress_on_ascend=%d "
             "disable_compression=%s kv_usage_trigger_enabled=%s",
             cfg.kv_budget,
             cfg.divide_length,
             int(getattr(cfg, "min_reclaim_blocks_on_ascend", 0) or 0),
             cfg.protect_prefill,
+            int(
+                getattr(
+                    cfg,
+                    "min_decode_tokens_before_compress_on_ascend",
+                    0,
+                )
+                or 0
+            ),
             cfg.disable_compression,
             cfg.enable_kv_usage_trigger,
         )

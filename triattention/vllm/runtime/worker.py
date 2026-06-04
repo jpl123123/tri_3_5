@@ -21,6 +21,7 @@ from .thresholds import (
     compression_length_threshold,
     is_ascend_environment_available,
     is_ascend_runtime,
+    should_defer_initial_decode_compression,
 )
 from .version import RUNTIME_BUILD_ID
 
@@ -158,15 +159,16 @@ def should_install_triattention_runner_proxy(
         config = TriAttentionRuntimeConfig.from_env()
         worker._triattention_runtime_config = config
 
+    is_ascend = (
+        is_ascend_runtime(worker)
+        or is_ascend_runtime(model_runner)
+        or is_ascend_environment_available()
+    )
     defer_chunked_prefill = bool(getattr(config, "defer_prefill_compression", False))
     if not defer_chunked_prefill and bool(
         getattr(config, "defer_prefill_compression_on_ascend", False)
     ):
-        defer_chunked_prefill = (
-            is_ascend_runtime(worker)
-            or is_ascend_runtime(model_runner)
-            or is_ascend_environment_available()
-        )
+        defer_chunked_prefill = is_ascend
 
     saw_trigger_without_worker_length = False
     block_size = _get_block_size_from_model_runner(model_runner)
@@ -176,31 +178,30 @@ def should_install_triattention_runner_proxy(
         scheduled_tokens = max(1, int(getattr(signal, "scheduled_tokens", 1) or 1))
         if defer_chunked_prefill and scheduled_tokens > 1:
             continue
-        if (
-            scheduled_tokens > 1
-            and (
-                is_ascend_runtime(worker)
-                or is_ascend_runtime(model_runner)
-                or is_ascend_environment_available()
-            )
-            and int(getattr(config, "prefill_max_compressions_on_ascend", 1) or 0)
-            == 0
-        ):
+        if scheduled_tokens > 1 and is_ascend and int(
+            getattr(config, "prefill_max_compressions_on_ascend", 1) or 0
+        ) == 0:
             continue
         actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
         if actual_kv is None or block_size is None:
             saw_trigger_without_worker_length = True
             continue
+        is_prefill_step = scheduled_tokens > 1
+        if should_defer_initial_decode_compression(
+            config=config,
+            effective_tokens=actual_kv,
+            prefill_len=int(getattr(signal, "prefill_len", 0) or 0),
+            is_ascend=is_ascend,
+            is_prefill_step=is_prefill_step,
+            compressed_once=False,
+        ):
+            continue
         if actual_kv >= _compression_threshold_for_signal(
             config,
             signal,
             block_size=block_size,
-            is_ascend=(
-                is_ascend_runtime(worker)
-                or is_ascend_runtime(model_runner)
-                or is_ascend_environment_available()
-            ),
-            is_prefill_step=scheduled_tokens > 1,
+            is_ascend=is_ascend,
+            is_prefill_step=is_prefill_step,
         ):
             return True
     return saw_trigger_without_worker_length
@@ -256,6 +257,7 @@ class TriAttentionWorker(VLLMGPUWorker):
                 "seq_len_override_patch=%s stats_path=%s model_path=%s protect_prefill=%s "
                 "window_size=%s score_max_layers=%d score_layer_stride=%d "
                 "min_reclaim_blocks_on_ascend=%d "
+                "min_decode_tokens_before_compress_on_ascend=%d "
                 "prefill_min_reclaim_blocks_on_ascend=%d "
                 "prefill_max_compressions_on_ascend=%d "
                 "fast_recency_only=%s fast_recency_accuracy_guard=%s "
@@ -276,6 +278,14 @@ class TriAttentionWorker(VLLMGPUWorker):
                 int(getattr(config, "score_max_layers", 0) or 0),
                 int(getattr(config, "score_layer_stride", 1) or 1),
                 int(getattr(config, "min_reclaim_blocks_on_ascend", 0) or 0),
+                int(
+                    getattr(
+                        config,
+                        "min_decode_tokens_before_compress_on_ascend",
+                        0,
+                    )
+                    or 0
+                ),
                 int(getattr(config, "prefill_min_reclaim_blocks_on_ascend", 0) or 0),
                 int(getattr(config, "prefill_max_compressions_on_ascend", 0) or 0),
                 bool(getattr(config, "fast_recency_only", False)),

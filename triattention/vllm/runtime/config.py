@@ -76,6 +76,8 @@ class TriAttentionRuntimeConfig:
     effective_len_guard_divide_multiples: int = 2
     defer_prefill_compression: bool = False
     defer_prefill_compression_on_ascend: bool = True
+    min_decode_tokens_before_compress: int = 0
+    min_decode_tokens_before_compress_on_ascend: int = 2048
     score_chunk_max_tokens: int = 4096
     score_max_layers: int = 0
     score_max_layers_on_ascend: int = 0
@@ -264,6 +266,14 @@ class TriAttentionRuntimeConfig:
             defer_prefill_compression_on_ascend=maybe_bool(
                 "DEFER_PREFILL_COMPRESSION_ON_ASCEND",
                 cls.defer_prefill_compression_on_ascend,
+            ),
+            min_decode_tokens_before_compress=maybe_int(
+                "MIN_DECODE_TOKENS_BEFORE_COMPRESS",
+                cls.min_decode_tokens_before_compress,
+            ),
+            min_decode_tokens_before_compress_on_ascend=maybe_int(
+                "MIN_DECODE_TOKENS_BEFORE_COMPRESS_ON_ASCEND",
+                cls.min_decode_tokens_before_compress_on_ascend,
             ),
             score_chunk_max_tokens=maybe_int(
                 "SCORE_CHUNK_MAX_TOKENS",
@@ -483,6 +493,16 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "score_max_layers_on_ascend must be >= 0, "
                 f"got {self.score_max_layers_on_ascend}"
+            )
+        if self.min_decode_tokens_before_compress < 0:
+            raise ValueError(
+                "min_decode_tokens_before_compress must be >= 0, "
+                f"got {self.min_decode_tokens_before_compress}"
+            )
+        if self.min_decode_tokens_before_compress_on_ascend < 0:
+            raise ValueError(
+                "min_decode_tokens_before_compress_on_ascend must be >= 0, "
+                f"got {self.min_decode_tokens_before_compress_on_ascend}"
             )
         if self.score_layer_stride < 1:
             raise ValueError(

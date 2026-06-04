@@ -41,8 +41,10 @@ from .signals import CompressionSignal
 from .state import RequestStateStore
 from .thresholds import (
     compression_length_threshold,
+    initial_decode_compression_grace_tokens,
     is_ascend_environment_available,
     is_ascend_runtime,
+    should_defer_initial_decode_compression,
 )
 from .worker_reclaim_sync import apply_worker_block_reclaim_events
 
@@ -701,6 +703,50 @@ class TriAttentionModelRunner:
                 effective_kv = actual_kv
             else:
                 effective_kv = actual_kv + scheduled_tokens_i
+            if should_defer_initial_decode_compression(
+                config=self.config,
+                effective_tokens=effective_kv,
+                prefill_len=prefill_len,
+                is_ascend=is_ascend,
+                is_prefill_step=is_prefill_step_for_threshold,
+                compressed_once=bool(
+                    int(getattr(state, "compression_count", 0) or 0)
+                ),
+            ):
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                    if hasattr(self.state_store, "mark_compression_skipped"):
+                        self.state_store.mark_compression_skipped(
+                            req_id=req_id,
+                            reason="initial_decode_grace",
+                            step=self._last_step,
+                        )
+                    if self.config.log_decisions:
+                        self._logger.debug(
+                            "TriAttention dropped initial decode trigger: "
+                            "req=%s effective_kv=%d prefill_len=%d scheduled=%d",
+                            req_id,
+                            effective_kv,
+                            prefill_len,
+                            scheduled_tokens_i,
+                        )
+                self._log_execution_path_trigger_guard(
+                    req_id=req_id,
+                    reason="initial_decode_grace",
+                    actual_kv=actual_kv,
+                    decoded_after_prefill=max(0, effective_kv - max(0, prefill_len)),
+                    effective_kv=effective_kv,
+                    from_blocks=kv_from_blocks,
+                    grace_tokens=initial_decode_compression_grace_tokens(
+                        self.config,
+                        is_ascend=is_ascend,
+                    ),
+                    prefill_len=prefill_len,
+                    scheduled=scheduled_tokens_i,
+                    scheduler_had_signal=bool(existing),
+                    threshold=threshold,
+                )
+                continue
             if should_guard_fast_recency_long_context(
                 config=self.config,
                 effective_tokens=effective_kv,
