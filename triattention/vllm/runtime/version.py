@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-RUNTIME_BUILD_ID = "hook-initial-decode-grace-v26-20260604"
+RUNTIME_BUILD_ID = "ascend-core-entry-v27-20260605"
 
 
 def runtime_build_info() -> str:

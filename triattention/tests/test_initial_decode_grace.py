@@ -5,15 +5,17 @@ from triattention.vllm.runtime.thresholds import (
 )
 
 
-def test_initial_decode_grace_defaults_to_ascend_only():
+def test_initial_decode_grace_defaults_to_opt_in():
     config = TriAttentionRuntimeConfig()
 
     assert initial_decode_compression_grace_tokens(config, is_ascend=False) == 0
-    assert initial_decode_compression_grace_tokens(config, is_ascend=True) == 2048
+    assert initial_decode_compression_grace_tokens(config, is_ascend=True) == 0
 
 
-def test_initial_decode_grace_defers_first_ascend_decode():
-    config = TriAttentionRuntimeConfig()
+def test_initial_decode_grace_defers_first_ascend_decode_when_configured():
+    config = TriAttentionRuntimeConfig(
+        min_decode_tokens_before_compress_on_ascend=2048,
+    )
 
     assert should_defer_initial_decode_compression(
         config=config,
@@ -57,9 +59,9 @@ def test_initial_decode_grace_does_not_affect_prefill_or_compressed_requests():
 def test_initial_decode_grace_env_override(monkeypatch):
     monkeypatch.setenv(
         "TRIATTN_RUNTIME_MIN_DECODE_TOKENS_BEFORE_COMPRESS_ON_ASCEND",
-        "0",
+        "1024",
     )
 
     config = TriAttentionRuntimeConfig.from_env()
 
-    assert initial_decode_compression_grace_tokens(config, is_ascend=True) == 0
+    assert initial_decode_compression_grace_tokens(config, is_ascend=True) == 1024

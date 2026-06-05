@@ -30,7 +30,7 @@ def _signal():
     )
 
 
-def test_first_ascend_decode_hook_defers_action_after_core_entry():
+def test_first_ascend_decode_hook_enters_core_by_default():
     signal = CompressionSignal(
         req_id="req-1",
         should_compress=True,
@@ -48,6 +48,47 @@ def test_first_ascend_decode_hook_defers_action_after_core_entry():
         config=TriAttentionRuntimeConfig(
             enable_experimental_kv_compaction=True,
             defer_prefill_compression_on_ascend=False,
+        ),
+        req_id="req-1",
+        req_state=SimpleNamespace(num_computed_tokens=9863, block_ids=[[1] * 80]),
+        req_runtime_state=SimpleNamespace(
+            compression_count=0,
+            current_cache_len=0,
+            last_absorbed_cache_len=9863,
+        ),
+        signal=signal,
+        scheduler_output=SimpleNamespace(
+            scheduled_new_reqs=[],
+            num_scheduled_tokens={"req-1": 1},
+        ),
+        compressed_once=set(),
+        original_block_ids_by_group=[[1] * 80],
+        block_size_hint=128,
+    )
+
+    assert not context.should_defer_recompress
+    assert context.defer_reason is None
+
+
+def test_first_ascend_decode_hook_can_opt_into_initial_grace():
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=9864,
+        step=6,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=9863,
+        scheduled_tokens=1,
+    )
+
+    context = build_hook_runtime_context(
+        base_runner=_AscendRunner(),
+        config=TriAttentionRuntimeConfig(
+            enable_experimental_kv_compaction=True,
+            defer_prefill_compression_on_ascend=False,
+            min_decode_tokens_before_compress_on_ascend=2048,
         ),
         req_id="req-1",
         req_state=SimpleNamespace(num_computed_tokens=9863, block_ids=[[1] * 80]),

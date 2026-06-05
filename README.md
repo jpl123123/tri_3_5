@@ -323,6 +323,7 @@ multi-rank runs, so keep them off for latency or throughput comparisons.
 | `TRIATTN_RUNTIME_SPARSE_STATS_PATH` | packaged stats when available | Path to precomputed frequency statistics `.pt` file |
 | `TRIATTN_RUNTIME_PROTECT_PREFILL` | `false` | Protect initial prompt tokens from eviction |
 | `TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND` | `true` | On vLLM-Ascend, wait until full prompt prefill finishes before first KV compaction |
+| `TRIATTN_RUNTIME_MIN_DECODE_TOKENS_BEFORE_COMPRESS_ON_ASCEND` | `0` | Optional Ascend-only grace window after prefill before the first decode compression; default `0` enters the TriAttention core at the first eligible decode boundary |
 | `TRIATTN_RUNTIME_SCORE_MAX_LAYERS` | `0` | Maximum number of layers to score before cross-layer aggregation (`0` means all layers unless the Ascend limit below is explicitly set) |
 | `TRIATTN_RUNTIME_SCORE_MAX_LAYERS_ON_ASCEND` | effective default `8` | Ascend-only layer cap used when `SCORE_MAX_LAYERS=0`; set `0` explicitly to score all layers |
 | `TRIATTN_RUNTIME_SCORE_LAYER_STRIDE` | `1` | Score one layer every N layers before optional max-layer sampling |

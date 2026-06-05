@@ -234,6 +234,13 @@ backfills request state from the NPU runner and allows the first decode step to
 trigger compression even when vLLM-Ascend's scheduler counters still lag behind
 the full prompt length.
 
+The default `TRIATTN_RUNTIME_MIN_DECODE_TOKENS_BEFORE_COMPRESS_ON_ASCEND=0`
+keeps that first eligible decode boundary active, so a real sparse run should
+reach `worker_hook_enter`, `group_pipeline_enter`, and
+`selector_scoring_enter` as soon as the prompt has finished prefill and the
+length/reclaim threshold is satisfied. If a deployment needs to delay the first
+post-prefill compaction for TPOT experiments, set this variable explicitly.
+
 ## Performance Tuning
 
 On Ascend, the default path keeps sparse-stat per-head selection and caps

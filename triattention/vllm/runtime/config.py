@@ -77,7 +77,7 @@ class TriAttentionRuntimeConfig:
     defer_prefill_compression: bool = False
     defer_prefill_compression_on_ascend: bool = True
     min_decode_tokens_before_compress: int = 0
-    min_decode_tokens_before_compress_on_ascend: int = 2048
+    min_decode_tokens_before_compress_on_ascend: int = 0
     score_chunk_max_tokens: int = 4096
     score_max_layers: int = 0
     score_max_layers_on_ascend: int = 0
