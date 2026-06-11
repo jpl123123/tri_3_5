@@ -47,6 +47,7 @@ export TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=1
 export TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH=1
 export TRIATTN_RUNTIME_FAST_RECENCY_ACCURACY_GUARD=1
 export TRIATTN_RUNTIME_ENABLE_PACKED_POS_DELTA_ON_ASCEND=0
+export TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE=0
 
 # auto = Triton on CUDA, PyTorch/torch_npu on NPU.
 export TRIATTN_RUNTIME_SCORING_BACKEND=auto
@@ -384,6 +385,12 @@ batches are run outside vLLM-Ascend graph/compiled mode to avoid ACL graph
 replay/update instability; single-request batches keep the normal graph-mode
 path. Set it to `0` only for targeted graph-mode experiments on a validated
 vLLM-Ascend build.
+
+`TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE=0` is the default. The effective
+seq-len and slot-mapping overrides already describe the compressed KV view, so
+the Ascend V1 block table keeps its full preallocated column shape for
+multi-request serving stability. Set this to `1` only for targeted
+single-request microbenchmarks after validating the target vLLM-Ascend build.
 
 ## Calibration Stats
 

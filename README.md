@@ -335,6 +335,7 @@ multi-rank runs, so keep them off for latency or throughput comparisons.
 | `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND` | `true` | Install the TriAttention runner proxy during Ascend worker init so patching happens before measured requests |
 | `TRIATTN_RUNTIME_PREINSTALL_INPUT_PATCH` | `true` | Install input patches when the runner proxy is created instead of waiting for the first compressed request |
 | `TRIATTN_RUNTIME_FORCE_EAGER_MULTI_REQ_ON_ASCEND_EFFECTIVE_OVERRIDES` | `true` | On vLLM-Ascend, run multi-request batches that need compressed-KV effective overrides outside graph/compiled mode to avoid ACL graph replay/update instability; single-request batches keep the normal graph-mode path |
+| `TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE` | `false` | Experimental Ascend V1 metadata micro-optimization; keep disabled for multi-request compressed batches so the full preallocated block table shape is preserved while seq-len and slot-mapping overrides carry the effective KV view |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_KV_COMPACTION` | `true` | Enable in-place KV cache compaction |
 | `TRIATTN_RUNTIME_ENABLE_EXPERIMENTAL_BLOCK_RECLAIM` | `true` | Enable freed block reclamation |
 | `ENABLE_TRIATTENTION` | `true` | Master switch to enable/disable the plugin |

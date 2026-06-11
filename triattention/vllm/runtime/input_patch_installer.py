@@ -66,7 +66,7 @@ def _env_bool(name: str, default: bool) -> bool:
 def _ascend_v1_block_table_trim_enabled() -> bool:
     if _env_bool("TRIATTN_DEBUG_DISABLE_ASCEND_BLOCK_TABLE_TRIM", False):
         return False
-    return _env_bool("TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE", True)
+    return _env_bool("TRIATTN_RUNTIME_TRIM_ASCEND_V1_BLOCK_TABLE", False)
 
 
 def _is_triattention_patched(func: Any) -> bool:
