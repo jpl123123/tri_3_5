@@ -98,6 +98,7 @@ class TriAttentionRuntimeConfig:
     auto_fast_recency_on_ascend: bool = True
     early_install_proxy_on_ascend: bool = True
     preinstall_input_patch: bool = True
+    force_eager_multi_req_on_ascend_effective_overrides: bool = True
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -348,6 +349,10 @@ class TriAttentionRuntimeConfig:
             preinstall_input_patch=maybe_bool(
                 "PREINSTALL_INPUT_PATCH",
                 cls.preinstall_input_patch,
+            ),
+            force_eager_multi_req_on_ascend_effective_overrides=maybe_bool(
+                "FORCE_EAGER_MULTI_REQ_ON_ASCEND_EFFECTIVE_OVERRIDES",
+                cls.force_eager_multi_req_on_ascend_effective_overrides,
             ),
             sparse_stats_path=sparse_stats_path_candidate,
             model_path=Path(model_path_raw) if model_path_raw else None,

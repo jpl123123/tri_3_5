@@ -14,6 +14,7 @@ from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
 
 from .ascend_defaults import apply_ascend_fast_recency_defaults
+from .ascend_graph_mode_patch import make_patched_ascend_forward_context
 from .config import TriAttentionRuntimeConfig
 from .effective_len_tracker import EffectiveCacheLenTracker
 from .kv_allocation_sync import (
@@ -43,6 +44,8 @@ _ORIG_SCHED_UPDATE_FROM_OUTPUT: Callable[..., Any] | None = None
 _ORIG_WORKER_INIT_DEVICE: Callable[..., Any] | None = None
 _ORIG_WORKER_EXECUTE_MODEL: Callable[..., Any] | None = None
 _ORIG_ASCEND_WORKER_METHODS: dict[type, dict[str, Callable[..., Any]]] = {}
+_ORIG_ASCEND_SET_FORWARD_CONTEXT: Callable[..., Any] | None = None
+_ORIG_ASCEND_MODEL_RUNNER_SET_FORWARD_CONTEXT: Callable[..., Any] | None = None
 _ORIG_KVCACHE_ALLOCATE_SLOTS: Callable[..., Any] | None = None
 _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE: Callable[..., Any] | None = None
 _DEFER_PREFILL_BOUNDARY_CACHE: bool | None = None
@@ -376,6 +379,52 @@ def _patch_worker_class_for_triattention(
     return True
 
 
+def _install_optional_ascend_forward_context_patch() -> None:
+    global _ORIG_ASCEND_SET_FORWARD_CONTEXT, _ORIG_ASCEND_MODEL_RUNNER_SET_FORWARD_CONTEXT
+    patched: list[str] = []
+    try:
+        import vllm_ascend.ascend_forward_context as ascend_context_mod
+
+        original = getattr(ascend_context_mod, "set_ascend_forward_context", None)
+        if callable(original) and not getattr(original, "_triattention_patched", False):
+            _ORIG_ASCEND_SET_FORWARD_CONTEXT = original
+            ascend_context_mod.set_ascend_forward_context = (
+                make_patched_ascend_forward_context(original)
+            )
+            patched.append("vllm_ascend.ascend_forward_context.set_ascend_forward_context")
+    except Exception:
+        if runtime_logging_enabled():
+            log_fn = logger.warning if is_ascend_environment_available() else logger.debug
+            log_fn(
+                "Could not install TriAttention Ascend forward-context patch",
+                exc_info=True,
+            )
+
+    try:
+        import vllm_ascend.worker.model_runner_v1 as ascend_model_runner_mod
+
+        original = getattr(ascend_model_runner_mod, "set_ascend_forward_context", None)
+        if callable(original) and not getattr(original, "_triattention_patched", False):
+            _ORIG_ASCEND_MODEL_RUNNER_SET_FORWARD_CONTEXT = original
+            ascend_model_runner_mod.set_ascend_forward_context = (
+                make_patched_ascend_forward_context(original)
+            )
+            patched.append("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context")
+    except Exception:
+        if runtime_logging_enabled():
+            log_fn = logger.warning if is_ascend_environment_available() else logger.debug
+            log_fn(
+                "Could not install TriAttention Ascend model-runner context patch",
+                exc_info=True,
+            )
+
+    if patched and runtime_logging_enabled():
+        logger.info(
+            "Installed TriAttention Ascend graph-mode guard patches: %s",
+            ", ".join(patched),
+        )
+
+
 def _install_optional_ascend_worker_patches() -> None:
     patched: list[str] = []
     try:
@@ -435,6 +484,7 @@ def _install_optional_ascend_worker_patches() -> None:
 def _install_worker_patches(worker_cls: type | None) -> None:
     _patch_vllm_gpu_worker_class_for_triattention(worker_cls)
     _install_optional_ascend_worker_patches()
+    _install_optional_ascend_forward_context_patch()
     cfg = TriAttentionRuntimeConfig.from_env()
     if bool(getattr(cfg, "preinstall_input_patch", True)):
         install_runtime_input_patch()

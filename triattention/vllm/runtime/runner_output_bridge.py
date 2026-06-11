@@ -7,11 +7,13 @@ Keeps `TriAttentionModelRunner` focused on orchestration while this module owns:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import time
-from typing import Any
+from typing import Any, Iterator
 
 from vllm.logger import logger
 
+from .graph_mode_guard import force_ascend_eager_and_skip_compiled
 from .input_adapter import active_effective_input_overrides, prepare_effective_input_overrides
 from .input_patch_backend import assert_effective_overrides_consumed
 from .logging_control import runtime_logging_enabled
@@ -22,6 +24,7 @@ from .phase_profile import (
     record_phase,
 )
 from .runner_struct_compat import debug_v1_override_path_enabled
+from .thresholds import is_ascend_environment_available, is_ascend_runtime
 
 
 def _scheduler_output_details(
@@ -48,6 +51,64 @@ def _scheduler_output_details(
         "overrides": int(overrides),
         "sparse_overrides": int(sparse_overrides),
     }
+
+
+def _scheduled_request_count(scheduler_output: Any) -> int | None:
+    num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    return len(num_scheduled) if isinstance(num_scheduled, dict) else None
+
+
+def _has_sparse_effective_overrides(overrides: Any) -> bool:
+    return (
+        getattr(overrides, "seq_base_map", None) is not None
+        or getattr(overrides, "pos_delta_map", None) is not None
+        or getattr(overrides, "single_seq_base", None) is not None
+        or int(getattr(overrides, "single_pos_delta", 0) or 0) != 0
+    )
+
+
+def _should_guard_ascend_multi_req_effective_overrides(
+    *,
+    base_runner: Any,
+    scheduler_output: Any,
+    overrides: Any,
+    config: Any | None,
+) -> bool:
+    if not bool(
+        getattr(
+            config,
+            "force_eager_multi_req_on_ascend_effective_overrides",
+            True,
+        )
+    ):
+        return False
+    if not _has_sparse_effective_overrides(overrides):
+        return False
+    num_reqs = _scheduled_request_count(scheduler_output)
+    if num_reqs is None or num_reqs <= 1:
+        return False
+    return is_ascend_runtime(base_runner) or is_ascend_environment_available()
+
+
+@contextmanager
+def _temporary_model_config_enforce_eager(
+    base_runner: Any,
+    *,
+    enabled: bool,
+) -> Iterator[bool]:
+    model_config = getattr(base_runner, "model_config", None)
+    if not enabled or model_config is None or not hasattr(model_config, "enforce_eager"):
+        yield False
+        return
+    original = getattr(model_config, "enforce_eager")
+    if bool(original):
+        yield False
+        return
+    setattr(model_config, "enforce_eager", True)
+    try:
+        yield True
+    finally:
+        setattr(model_config, "enforce_eager", original)
 
 
 def _execute_base_runner(
@@ -137,18 +198,29 @@ def execute_base_model_with_effective_overrides(
             perf_out["base_exec_ms"] = (t3 - t2) * 1000.0
         return output
     # Use sparse overrides in hot path to avoid per-step dense tensor copies.
+    guard_ascend_graph_mode = _should_guard_ascend_multi_req_effective_overrides(
+        base_runner=base_runner,
+        scheduler_output=scheduler_output,
+        overrides=overrides,
+        config=config,
+    )
     with active_effective_input_overrides(overrides):
-        if perf_enabled:
-            t2 = time.perf_counter()
-        output = _execute_base_runner(
-            base_runner=base_runner,
-            scheduler_output=scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            overrides=True,
-            sparse_overrides=True,
-        )
-        if perf_enabled:
-            t3 = time.perf_counter()
+        with force_ascend_eager_and_skip_compiled(guard_ascend_graph_mode):
+            with _temporary_model_config_enforce_eager(
+                base_runner,
+                enabled=guard_ascend_graph_mode,
+            ):
+                if perf_enabled:
+                    t2 = time.perf_counter()
+                output = _execute_base_runner(
+                    base_runner=base_runner,
+                    scheduler_output=scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    overrides=True,
+                    sparse_overrides=True,
+                )
+                if perf_enabled:
+                    t3 = time.perf_counter()
         if (
             getattr(base_runner, "req_states", None) is not None
             or getattr(base_runner, "input_batch", None) is not None

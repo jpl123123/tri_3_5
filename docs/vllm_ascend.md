@@ -377,6 +377,14 @@ behavior, set `TRIATTN_RUNTIME_EARLY_INSTALL_PROXY_ON_ASCEND=0` and
 is an experimental slot-mapping micro-optimization and should only be enabled
 after validating output quality for the target vLLM-Ascend build.
 
+`TRIATTN_RUNTIME_FORCE_EAGER_MULTI_REQ_ON_ASCEND_EFFECTIVE_OVERRIDES=1` is
+enabled by default. It only applies to multi-request batches after a request has
+compressed KV state and needs effective seq-len/slot-position overrides. Those
+batches are run outside vLLM-Ascend graph/compiled mode to avoid ACL graph
+replay/update instability; single-request batches keep the normal graph-mode
+path. Set it to `0` only for targeted graph-mode experiments on a validated
+vLLM-Ascend build.
+
 ## Calibration Stats
 
 TriAttention still requires a model-specific statistics file produced by
