@@ -81,6 +81,134 @@ def _validate_expected_v1_batch_mapping(
         )
 
 
+def _block_table_inner_tables(block_table_obj: Any) -> list[Any]:
+    inner_tables = getattr(block_table_obj, "block_tables", None)
+    if isinstance(inner_tables, (list, tuple)) and inner_tables:
+        return list(inner_tables)
+    return [block_table_obj]
+
+
+def _table_block_size(table: Any) -> int | None:
+    for attr_name in ("block_size", "logical_block_size", "physical_block_size"):
+        try:
+            value = int(getattr(table, attr_name))
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _table_row_block_count(table: Any, row_idx: int) -> int | None:
+    num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
+    if num_blocks_per_row is None:
+        return None
+    try:
+        return int(num_blocks_per_row[row_idx])
+    except Exception:
+        return None
+
+
+def _active_override_rows(*, req_indices: np.ndarray, num_reqs: int) -> list[int]:
+    rows: set[int] = set()
+    expected_rows = _patch_state.ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU
+    if expected_rows is not None:
+        try:
+            expected_np = expected_rows.detach().cpu().numpy().astype(np.int64, copy=False)
+            rows.update(
+                int(row)
+                for row in expected_np.tolist()
+                if 0 <= int(row) < int(num_reqs)
+            )
+        except Exception:
+            pass
+
+    if _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None and num_reqs == 1:
+        rows.add(0)
+    if _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0 and num_reqs == 1:
+        rows.add(0)
+
+    for mapping in (
+        _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX,
+        _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX,
+    ):
+        if not mapping:
+            continue
+        for row in mapping.keys():
+            try:
+                row_i = int(row)
+            except Exception:
+                continue
+            if 0 <= row_i < int(num_reqs):
+                rows.add(row_i)
+
+    if not rows and req_indices.size:
+        rows.update(
+            int(row)
+            for row in np.unique(req_indices.astype(np.int64, copy=False)).tolist()
+            if 0 <= int(row) < int(num_reqs)
+        )
+    return sorted(rows)
+
+
+def _validate_v1_block_table_bounds(
+    *,
+    block_table: Any,
+    seq_lens_np: np.ndarray,
+    req_indices: np.ndarray,
+    slot_positions_np: np.ndarray | None,
+    num_reqs: int,
+    validate_seq_lens: bool,
+) -> None:
+    if block_table is None or num_reqs <= 0:
+        return
+    tables = _block_table_inner_tables(block_table)
+    rows = _active_override_rows(req_indices=req_indices, num_reqs=num_reqs)
+    if not tables or not rows:
+        return
+
+    if slot_positions_np is not None and np.any(slot_positions_np < 0):
+        raise RuntimeError(
+            "TRIATTN_ASCEND_V1_SLOT_POSITION_NEGATIVE:"
+            f"positions={slot_positions_np.astype(np.int64, copy=False).tolist()}"
+        )
+
+    req_indices_i64 = req_indices.astype(np.int64, copy=False)
+    slot_positions_i64 = (
+        slot_positions_np.astype(np.int64, copy=False)
+        if slot_positions_np is not None
+        else None
+    )
+    for row in rows:
+        row_mask = req_indices_i64 == int(row)
+        max_slot_position: int | None = None
+        if slot_positions_i64 is not None and bool(row_mask.any()):
+            row_positions = slot_positions_i64[row_mask]
+            max_slot_position = int(row_positions.max(initial=-1))
+        seq_len = int(seq_lens_np[row]) if validate_seq_lens else None
+
+        for gid, table in enumerate(tables):
+            block_size = _table_block_size(table)
+            current_blocks = _table_row_block_count(table, row)
+            if block_size is None or current_blocks is None:
+                continue
+            capacity = max(0, int(block_size) * int(current_blocks))
+            if validate_seq_lens and seq_len is not None and seq_len > capacity:
+                raise RuntimeError(
+                    "TRIATTN_ASCEND_V1_BLOCK_TABLE_CAPACITY_MISMATCH:"
+                    f"row={row}:gid={gid}:seq_len={seq_len}:"
+                    f"blocks={current_blocks}:block_size={block_size}:"
+                    f"capacity={capacity}"
+                )
+            if max_slot_position is not None and max_slot_position >= capacity:
+                raise RuntimeError(
+                    "TRIATTN_ASCEND_V1_SLOT_POSITION_OOB:"
+                    f"row={row}:gid={gid}:max_slot_position={max_slot_position}:"
+                    f"blocks={current_blocks}:block_size={block_size}:"
+                    f"capacity={capacity}"
+                )
+
+
 def _build_effective_slot_positions(
     *,
     positions_np: np.ndarray,
@@ -180,6 +308,7 @@ def make_patched_v1_prepare_inputs(
         effective_max_seq_len = None
         total_num_scheduled_tokens = 0
         num_reqs = 0
+        slot_positions_np: np.ndarray | None = None
         try:
             out = original_prepare_inputs(self, scheduler_output, num_scheduled_tokens)
 
@@ -206,6 +335,14 @@ def make_patched_v1_prepare_inputs(
                 req_indices=req_indices,
             )
             if slot_positions_np is not None:
+                _validate_v1_block_table_bounds(
+                    block_table=self.input_batch.block_table,
+                    seq_lens_np=self.seq_lens.np,
+                    req_indices=req_indices,
+                    slot_positions_np=slot_positions_np,
+                    num_reqs=num_reqs,
+                    validate_seq_lens=False,
+                )
                 self.input_batch.block_table.compute_slot_mapping(req_indices, slot_positions_np)
                 self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
                 slot_applied = True
@@ -224,6 +361,16 @@ def make_patched_v1_prepare_inputs(
                 )
             else:
                 _patch_state.set_active_effective_max_seq_len(None)
+
+            if seq_applied:
+                _validate_v1_block_table_bounds(
+                    block_table=self.input_batch.block_table,
+                    seq_lens_np=self.seq_lens.np,
+                    req_indices=req_indices,
+                    slot_positions_np=None,
+                    num_reqs=num_reqs,
+                    validate_seq_lens=seq_applied,
+                )
 
             return out
         finally:

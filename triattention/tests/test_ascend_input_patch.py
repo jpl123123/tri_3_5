@@ -34,6 +34,20 @@ from triattention.vllm.runtime.input_patch_vllm_v1_backend import (
 )
 
 
+class _V1BlockTable:
+    def __init__(self, *, block_size=128, num_blocks_per_row=(4,)):
+        self.block_size = block_size
+        self.num_blocks_per_row = np.array(num_blocks_per_row, dtype=np.int32)
+        self.compute_calls = []
+        self.commit_calls = []
+
+    def compute_slot_mapping(self, req_indices, positions):
+        self.compute_calls.append((req_indices.copy(), positions.copy()))
+
+    def commit_slot_mapping(self, total_num_scheduled_tokens):
+        self.commit_calls.append(total_num_scheduled_tokens)
+
+
 def test_ascend_v2_seq_override_updates_seq_lens_np():
     def _original(self, scheduler_output, req_ids):
         del scheduler_output
@@ -200,3 +214,136 @@ def test_v1_prepare_inputs_fails_on_stale_expected_batch_row():
             effective_base_by_req_idx=None,
             effective_pos_delta_by_req_idx=None,
         )
+
+
+def test_v1_prepare_inputs_fails_when_effective_seq_exceeds_block_table_capacity():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=_V1BlockTable(block_size=128, num_blocks_per_row=(3,)),
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([4097, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx=None,
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        try:
+            patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+        except RuntimeError as exc:
+            assert "TRIATTN_ASCEND_V1_BLOCK_TABLE_CAPACITY_MISMATCH" in str(exc)
+            assert "seq_len=385" in str(exc)
+            assert "capacity=384" in str(exc)
+        else:
+            raise AssertionError("block table capacity mismatch should fail fast")
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+
+def test_v1_prepare_inputs_fails_when_shifted_slot_position_is_out_of_bounds():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=_V1BlockTable(block_size=128, num_blocks_per_row=(3,)),
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([4097, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx=None,
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        try:
+            patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+        except RuntimeError as exc:
+            assert "TRIATTN_ASCEND_V1_SLOT_POSITION_OOB" in str(exc)
+            assert "max_slot_position=384" in str(exc)
+            assert "capacity=384" in str(exc)
+        else:
+            raise AssertionError("slot position capacity mismatch should fail fast")
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+
+def test_v1_prepare_inputs_validates_shifted_slot_positions_within_capacity():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(4,))
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([4097, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert runner.seq_lens.np[0] == 385
+    assert block_table.commit_calls == [1]
+    np.testing.assert_array_equal(block_table.compute_calls[0][1], [384])

@@ -71,6 +71,19 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_positive_int(value: Any) -> int | None:
+    number = _safe_int(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
+def _ceil_div_positive(value: int, divisor: int) -> int:
+    if value <= 0 or divisor <= 0:
+        return 0
+    return (value + divisor - 1) // divisor
+
+
 def _shape0(value: Any) -> int | None:
     try:
         return int(value.shape[0])
@@ -157,6 +170,67 @@ def _as_sequence(value: Any) -> list[Any] | None:
         return [value[idx] for idx in range(len(value))]
     except Exception:
         return None
+
+
+def _applied_compression_events_by_req_id(events: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
+    out: dict[Any, dict[str, Any]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("status") != "applied":
+            continue
+        req_id = event.get("req_id")
+        if req_id is not None:
+            out[req_id] = event
+    return out
+
+
+def _event_retained_cache_len(event: dict[str, Any] | None) -> int | None:
+    if event is None:
+        return None
+    details = event.get("details")
+    retained_cache_len = (
+        details.get("retained_cache_len")
+        if isinstance(details, dict)
+        else None
+    )
+    retained_cache_len_i = _safe_positive_int(retained_cache_len)
+    if retained_cache_len_i is not None:
+        return retained_cache_len_i
+    return _safe_positive_int(event.get("cache_len_after"))
+
+
+def _block_table_inner_tables(block_table_obj: Any) -> list[Any]:
+    inner_tables = getattr(block_table_obj, "block_tables", None)
+    if isinstance(inner_tables, (list, tuple)) and inner_tables:
+        return list(inner_tables)
+    return [block_table_obj]
+
+
+def _table_row_block_count(table: Any, req_index: int) -> int | None:
+    num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
+    if num_blocks_per_row is None:
+        return None
+    try:
+        return int(num_blocks_per_row[req_index])
+    except Exception:
+        return None
+
+
+def _table_block_size(table: Any, fallback: int | None) -> int | None:
+    for attr_name in ("block_size", "logical_block_size", "physical_block_size"):
+        value = _safe_positive_int(getattr(table, attr_name, None))
+        if value is not None:
+            return value
+    return fallback
+
+
+def _table_max_blocks(table: Any, block_table_obj: Any) -> int | None:
+    for owner in (table, block_table_obj):
+        value = _safe_positive_int(getattr(owner, "max_num_blocks_per_req", None))
+        if value is not None:
+            return value
+    return None
 
 
 def _resolve_model_layers(model: Any) -> list[Any]:
@@ -843,8 +917,8 @@ class TriAttentionModelRunner:
 
         After compression, the worker's block table has been shrunk via
         worker_reclaim_sync.  But the scheduler may still send excess
-        new_block_ids based on its stale view.  This trims those to fit
-        within the worker's actual block capacity.
+        new_block_ids based on its stale view.  This trims those to match the
+        just-retained cache length and then applies the worker row capacity cap.
         """
         cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
         if cached_reqs is None:
@@ -861,18 +935,92 @@ class TriAttentionModelRunner:
         block_table_obj = getattr(input_batch, "block_table", None) if input_batch else None
         if block_table_obj is None:
             return
-        max_blocks = getattr(block_table_obj, "max_num_blocks_per_req", None)
-        if not isinstance(max_blocks, int) or max_blocks <= 0:
-            return
 
-        # Get num_blocks_per_row from the (possibly single) inner table.
-        inner_tables = getattr(block_table_obj, "block_tables", None)
-        first_table = inner_tables[0] if isinstance(inner_tables, list) and inner_tables else block_table_obj
-        num_blocks_per_row = getattr(first_table, "num_blocks_per_row", None)
+        tables = _block_table_inner_tables(block_table_obj)
+        if not tables:
+            return
 
         req_id_to_index = getattr(input_batch, "req_id_to_index", None)
         if not isinstance(req_id_to_index, dict):
             return
+
+        fallback_block_size = _safe_positive_int(
+            getattr(getattr(self._base_runner, "cache_config", None), "block_size", None)
+        )
+        events_by_req_id = _applied_compression_events_by_req_id(
+            self._pending_compression_events
+        )
+
+        def _group_limits_for_event(req_index: int, retained_cache_len: int | None) -> list[int | None]:
+            limits: list[int | None] = []
+            for table in tables:
+                current = _table_row_block_count(table, req_index)
+                if current is None:
+                    limits.append(None)
+                    continue
+                limit: int | None = None
+                block_size = _table_block_size(table, fallback_block_size)
+                if retained_cache_len is not None and block_size is not None:
+                    required = _ceil_div_positive(retained_cache_len, block_size)
+                    limit = max(0, required - current)
+                max_blocks = _table_max_blocks(table, block_table_obj)
+                if max_blocks is not None:
+                    capacity_limit = max(0, max_blocks - current)
+                    limit = capacity_limit if limit is None else min(limit, capacity_limit)
+                limits.append(limit)
+            return limits
+
+        def _trim_group(group: Any, limit: int | None) -> tuple[Any, int | None, int | None, bool]:
+            if not isinstance(group, (list, tuple)):
+                return group, None, None, False
+            before = len(group)
+            if limit is None:
+                return group, before, before, False
+            after = max(0, min(before, int(limit)))
+            if after == before:
+                return group, before, after, False
+            if isinstance(group, tuple):
+                return tuple(group[:after]), before, after, True
+            return list(group[:after]), before, after, True
+
+        def _trim_new_block_ids(
+            new_block_ids: Any,
+            group_limits: list[int | None],
+        ) -> tuple[Any, int, int, bool]:
+            if not isinstance(new_block_ids, (list, tuple)):
+                return new_block_ids, 0, 0, False
+            if (
+                len(tables) == 1
+                and not (
+                    len(new_block_ids) == 1
+                    and isinstance(new_block_ids[0], (list, tuple))
+                )
+                and all(not isinstance(item, (list, tuple)) for item in new_block_ids)
+            ):
+                trimmed, before, after, changed = _trim_group(
+                    new_block_ids,
+                    group_limits[0] if group_limits else None,
+                )
+                return trimmed, int(before or 0), int(after or 0), changed
+
+            trimmed_groups: list[Any] = []
+            before_max = 0
+            after_max = 0
+            changed_any = False
+            for gid, group in enumerate(new_block_ids):
+                limit = group_limits[gid] if gid < len(group_limits) else None
+                trimmed, before, after, changed = _trim_group(group, limit)
+                trimmed_groups.append(trimmed)
+                if before is not None:
+                    before_max = max(before_max, int(before))
+                if after is not None:
+                    after_max = max(after_max, int(after))
+                changed_any = changed_any or changed
+            if not changed_any:
+                return new_block_ids, before_max, after_max, False
+            if isinstance(new_block_ids, tuple):
+                return tuple(trimmed_groups), before_max, after_max, True
+            return trimmed_groups, before_max, after_max, True
 
         for i, req_id in enumerate(req_ids):
             rt_state = self.state_store.get(req_id)
@@ -887,30 +1035,25 @@ class TriAttentionModelRunner:
             if not isinstance(req_index, int):
                 continue
 
-            # Check if appending would overflow.
-            if num_blocks_per_row is not None:
-                current = int(num_blocks_per_row[req_index])
-            else:
+            event = events_by_req_id.get(req_id)
+            retained_cache_len = _event_retained_cache_len(event)
+            group_limits = _group_limits_for_event(req_index, retained_cache_len)
+            if not any(limit is not None for limit in group_limits):
                 continue
 
-            if isinstance(new_block_ids, (list, tuple)):
-                max_new = max(len(g) if isinstance(g, (list, tuple)) else 0 for g in new_block_ids)
-            else:
-                continue
-
-            if current + max_new > max_blocks:
-                # Trim to fit: only keep blocks that fit within max_blocks.
-                available = max(0, max_blocks - current)
-                trimmed = tuple(
-                    list(g)[:available] if isinstance(g, (list, tuple)) else g
-                    for g in new_block_ids
-                )
+            trimmed, before_max, after_max, changed = _trim_new_block_ids(
+                new_block_ids,
+                group_limits,
+            )
+            if changed:
                 new_block_ids_list[i] = trimmed
                 if self.config.log_decisions:
                     self._logger.debug(
                         "TriAttention patched new_block_ids: req=%s "
-                        "current_blocks=%d max=%d new_trimmed=%d->%d",
-                        req_id, current, max_blocks, max_new, available,
+                        "retained_cache_len=%s group_limits=%s "
+                        "new_trimmed=%d->%d",
+                        req_id, retained_cache_len, group_limits,
+                        before_max, after_max,
                     )
 
     def _needs_effective_input_overrides(self, scheduler_output: Any) -> bool:
