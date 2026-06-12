@@ -3,6 +3,7 @@ import types
 from types import SimpleNamespace
 
 import numpy as np
+import torch
 
 
 class _Logger:
@@ -346,6 +347,50 @@ def test_v1_prepare_inputs_validates_shifted_slot_positions_within_capacity():
 
     assert runner.seq_lens.np[0] == 385
     assert block_table.commit_calls == [1]
+    np.testing.assert_array_equal(block_table.compute_calls[0][1], [384])
+
+
+def test_v1_prepare_inputs_updates_ascend_optimistic_seq_lens_cpu():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(4,))
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([4097, 99], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+        optimistic_seq_lens_cpu=torch.tensor([4097, 99], dtype=torch.int32),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert runner.seq_lens.np.tolist() == [385, 0]
+    assert runner.optimistic_seq_lens_cpu.tolist() == [385, 0]
     np.testing.assert_array_equal(block_table.compute_calls[0][1], [384])
 
 

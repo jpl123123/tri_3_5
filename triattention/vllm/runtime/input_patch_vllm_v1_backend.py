@@ -10,6 +10,7 @@ import os
 from typing import Any, Callable
 
 import numpy as np
+import torch
 
 from . import input_patch_state as _patch_state
 from .phase_profile import (
@@ -395,6 +396,52 @@ def _apply_sparse_seq_len_overrides_in_place(
     return applied
 
 
+def _sync_v1_seq_lens_to_runner_buffers(
+    *,
+    runner: Any,
+    seq_lens_np: np.ndarray,
+    num_reqs: int,
+) -> bool:
+    """Mirror effective V1 seq_lens into buffers consumed by Ascend metadata."""
+    if num_reqs <= 0:
+        return False
+
+    synced = False
+    seq_lens = getattr(runner, "seq_lens", None)
+    copy_to_gpu = getattr(seq_lens, "copy_to_gpu", None)
+    if callable(copy_to_gpu):
+        copy_to_gpu()
+        synced = True
+    elif isinstance(seq_lens, torch.Tensor):
+        values = torch.as_tensor(
+            seq_lens_np[:num_reqs],
+            device=seq_lens.device,
+            dtype=seq_lens.dtype,
+        )
+        seq_lens[:num_reqs].copy_(values)
+        if int(seq_lens.numel()) > num_reqs:
+            seq_lens[num_reqs:].fill_(0)
+        synced = True
+
+    optimistic = getattr(runner, "optimistic_seq_lens_cpu", None)
+    if isinstance(optimistic, torch.Tensor):
+        values = torch.as_tensor(
+            seq_lens_np[:num_reqs],
+            device=optimistic.device,
+            dtype=optimistic.dtype,
+        )
+        optimistic[:num_reqs].copy_(values)
+        if int(optimistic.numel()) > num_reqs:
+            optimistic[num_reqs:].fill_(0)
+        synced = True
+    elif isinstance(optimistic, np.ndarray):
+        optimistic[:num_reqs] = seq_lens_np[:num_reqs]
+        if optimistic.size > num_reqs:
+            optimistic[num_reqs:].fill(0)
+        synced = True
+    return synced
+
+
 def _record_active_effective_max_seq_len(
     *,
     seq_lens_np: np.ndarray,
@@ -481,7 +528,11 @@ def make_patched_v1_prepare_inputs(
             )
             if seq_applied:
                 self.seq_lens.np[num_reqs:].fill(0)
-                self.seq_lens.copy_to_gpu()
+                _sync_v1_seq_lens_to_runner_buffers(
+                    runner=self,
+                    seq_lens_np=self.seq_lens.np,
+                    num_reqs=num_reqs,
+                )
                 effective_max_seq_len = _record_active_effective_max_seq_len(
                     seq_lens_np=self.seq_lens.np,
                     num_reqs=num_reqs,
