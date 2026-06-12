@@ -46,10 +46,39 @@ def _block_ids_after(group: dict[str, Any] | None) -> list[int] | None:
     return list(block_ids_after)
 
 
+def _clear_table_row_tail(table: Any, req_index: int, used_blocks: int) -> bool:
+    block_table = getattr(table, "block_table", None)
+    block_table_np = getattr(block_table, "np", None)
+    if not isinstance(block_table_np, np.ndarray):
+        return False
+    if block_table_np.ndim != 2:
+        return False
+    if req_index < 0 or req_index >= int(block_table_np.shape[0]):
+        return False
+    start = max(0, min(int(used_blocks), int(block_table_np.shape[1])))
+    if start >= int(block_table_np.shape[1]):
+        return True
+    block_table_np[req_index, start:] = 0
+    return True
+
+
+def _row_block_count(table: Any, req_index: int, fallback: int) -> int:
+    num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
+    if isinstance(num_blocks_per_row, np.ndarray):
+        if 0 <= req_index < int(num_blocks_per_row.shape[0]):
+            return int(num_blocks_per_row[req_index])
+    return int(fallback)
+
+
 def _rewrite_table_row(table: Any, req_index: int, block_ids: list[int]) -> bool:
     add_row = getattr(table, "add_row", None)
     if callable(add_row):
         add_row(block_ids, req_index)
+        _clear_table_row_tail(
+            table,
+            req_index,
+            _row_block_count(table, req_index, len(block_ids)),
+        )
         return True
 
     num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
@@ -61,6 +90,7 @@ def _rewrite_table_row(table: Any, req_index: int, block_ids: list[int]) -> bool
         return False
     if len(block_ids) > block_table_np.shape[1]:
         return False
+    block_table_np[req_index, :] = 0
     block_table_np[req_index, :len(block_ids)] = block_ids
     num_blocks_per_row[req_index] = len(block_ids)
     return True
@@ -187,6 +217,11 @@ def apply_worker_block_reclaim_events(
                         "(cache_len_after=%d block_size=%d)",
                         req_id, current, required_blocks, cache_len_after, block_size,
                     )
+            _clear_table_row_tail(
+                table,
+                req_index,
+                _row_block_count(table, req_index, min(current, required_blocks)),
+            )
 
         # Also truncate req_state.block_ids (CPU-side block tracking).
         # In vLLM V1, per-request state lives in base_runner.requests dict.
