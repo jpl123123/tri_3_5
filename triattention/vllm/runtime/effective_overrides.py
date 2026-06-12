@@ -206,6 +206,27 @@ def _set_cached_sparse_overrides_result(
         # Best-effort cache only.
         return
 
+
+def _resolve_override_row_map(base_runner: Any) -> tuple[dict[Any, int] | None, str]:
+    """Resolve row ids used by the active input-prep surface.
+
+    vLLM-Ascend V1 applies seq_len and slot-mapping overrides to
+    ``input_batch`` rows, while some runner builds also expose a separate
+    ``req_states.req_id_to_index`` map. Prefer the surface that the patched
+    input-prep code mutates so sparse override keys cannot drift from active
+    batch rows.
+    """
+    input_batch = getattr(base_runner, "input_batch", None)
+    input_batch_map = (
+        getattr(input_batch, "req_id_to_index", None)
+        if input_batch is not None
+        else None
+    )
+    if isinstance(input_batch_map, dict) and len(input_batch_map) > 0:
+        return input_batch_map, "input_batch"
+    return resolve_req_id_to_index(base_runner)
+
+
 def build_effective_sparse_overrides(
     *,
     base_runner: Any,
@@ -240,7 +261,7 @@ def build_effective_sparse_overrides(
                 value=out,
             )
             return out
-    req_id_to_index, _req_index_source = resolve_req_id_to_index(base_runner)
+    req_id_to_index, _req_index_source = _resolve_override_row_map(base_runner)
     if not isinstance(req_id_to_index, dict):
         out = (None, None, None, 0)
         _set_cached_sparse_overrides_result(

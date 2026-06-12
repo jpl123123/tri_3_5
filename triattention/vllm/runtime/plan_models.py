@@ -110,6 +110,7 @@ class PlacementPlan:
     effective_tokens_before: int
     budget_total: int
     recent_unabsorbed_tokens: int | None
+    retained_cache_len: int | None = None
     block_reclaim: ReclaimEvent | None = None
     selector_debug: dict[str, Any] | None = None
 
@@ -130,6 +131,7 @@ class PlacementPlan:
             ),
             "effective_tokens_before": self.effective_tokens_before,
             "budget_total": self.budget_total,
+            "retained_cache_len": self.retained_cache_len,
             "reclaimed_block_count": self.reclaimed_block_count,
             "recent_unabsorbed_tokens": self.recent_unabsorbed_tokens,
             "selector_debug": self.selector_debug,

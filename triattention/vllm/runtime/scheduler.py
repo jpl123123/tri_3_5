@@ -626,10 +626,18 @@ class TriAttentionScheduler(Scheduler):
             )
             self._last_signal_log_steps.pop(req_id, None)
 
+            _evt_scheduled = int(event.get("scheduled_tokens", 1))
             if not self.triattention_config.enable_experimental_block_reclaim:
                 continue
-            required_blocks = _num_required_blocks(cache_len_after)
-            _evt_scheduled = int(event.get("scheduled_tokens", 1))
+            details = event.get("details")
+            retained_cache_len = (
+                details.get("retained_cache_len")
+                if isinstance(details, dict)
+                else None
+            )
+            if not isinstance(retained_cache_len, int):
+                retained_cache_len = cache_len_after
+            required_blocks = _num_required_blocks(retained_cache_len)
             expected_shrink_gids: set[int] = set()
             reclaim_applied_any = False
             req_groups_seen = 0

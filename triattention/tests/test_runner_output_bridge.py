@@ -28,8 +28,12 @@ except Exception:
         )
 
 from triattention.vllm.runtime.config import TriAttentionRuntimeConfig
-from triattention.vllm.runtime.input_adapter import EffectiveInputOverrides
+from triattention.vllm.runtime.input_adapter import (
+    EffectiveInputOverrides,
+    prepare_effective_input_overrides,
+)
 from triattention.vllm.runtime import runner_output_bridge as bridge
+from triattention.vllm.runtime.state import RequestStateStore
 
 
 class _AscendRunner:
@@ -94,3 +98,38 @@ def test_temporary_enforce_eager_restores_original_value():
         assert base_runner.model_config.enforce_eager
 
     assert not base_runner.model_config.enforce_eager
+
+
+def test_effective_overrides_prefer_active_input_batch_rows():
+    state_store = RequestStateStore()
+    state_store.ensure("req-1", prefill_len=4096, protect_prefill=False)
+    state_store.mark_compressed(
+        "req-1",
+        step=7,
+        cache_len=2048,
+        scheduled_tokens=1,
+        scheduler_nct=4096,
+    )
+    base_runner = SimpleNamespace(
+        req_states=SimpleNamespace(req_id_to_index={"req-1": 5}),
+        input_batch=SimpleNamespace(req_id_to_index={"req-1": 0}),
+        requests={"req-1": SimpleNamespace(num_computed_tokens=4096)},
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req-1": 1},
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[4096],
+        ),
+    )
+
+    overrides = prepare_effective_input_overrides(
+        base_runner=base_runner,
+        state_store=state_store,
+        scheduler_output=scheduler_output,
+        config=TriAttentionRuntimeConfig(),
+    )
+
+    assert overrides.seq_base_map == {0: 2048}
+    assert overrides.pos_delta_map == {0: -2048}
+    assert overrides.expected_req_row_indices == (0,)

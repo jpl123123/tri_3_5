@@ -69,6 +69,34 @@ def test_worker_reclaim_truncate_clears_stale_block_table_tail():
     assert base_runner.requests["req-1"].block_ids == [[11, 12, 13]]
 
 
+def test_worker_reclaim_uses_retained_cache_len_for_current_decode_block():
+    table = _Table([[11, 12, 13, 14, 15, 16]])
+    base_runner = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        input_batch=SimpleNamespace(
+            req_id_to_index={"req-1": 0},
+            block_table=table,
+        ),
+        requests={"req-1": SimpleNamespace(block_ids=[[11, 12, 13, 14, 15, 16]])},
+    )
+
+    apply_worker_block_reclaim_events(
+        base_runner=base_runner,
+        events=[
+            {
+                "status": "applied",
+                "req_id": "req-1",
+                "cache_len_after": 256,
+                "details": {"retained_cache_len": 257},
+            }
+        ],
+    )
+
+    assert table.num_blocks_per_row[0] == 3
+    np.testing.assert_array_equal(table.block_table.np[0], [11, 12, 13, 0, 0, 0])
+    assert base_runner.requests["req-1"].block_ids == [[11, 12, 13]]
+
+
 def test_worker_reclaim_remap_rewrites_row_and_clears_stale_tail():
     table0 = _Table([[101, 102, 103, 104, 105, 106]])
     table1 = _Table([[201, 202, 203, 204, 205, 206]])

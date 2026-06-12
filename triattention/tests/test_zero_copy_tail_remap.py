@@ -3,12 +3,16 @@ import types
 
 from triattention.vllm.runtime.config import TriAttentionRuntimeConfig
 
-if "torch" not in sys.modules:
-    sys.modules["torch"] = types.SimpleNamespace(Tensor=object)
+try:
+    import torch  # noqa: F401
+except Exception:
+    if "torch" not in sys.modules:
+        sys.modules["torch"] = types.SimpleNamespace(Tensor=object)
 
 from triattention.vllm.runtime.hook_group_pipeline import (  # noqa: E402
     try_build_recency_tail_block_remap,
 )
+from triattention.vllm.runtime.layout_engine import truncate_tail_reclaim_group
 
 
 def _config():
@@ -48,3 +52,19 @@ def test_zero_copy_tail_remap_still_handles_exact_block_table():
     assert outcome.cache_len_after == 1936
     assert outcome.mutable_block_ids_by_group == [list(range(63, 79))]
     assert outcome.block_reclaim_groups[0].block_ids_removed == list(range(63))
+
+
+def test_truncate_tail_reclaim_preserves_current_decode_write_block():
+    kept, removed, group = truncate_tail_reclaim_group(
+        gid=0,
+        normalized_block_ids=[10, 11, 12, 13],
+        cache_len_after=256,
+        block_size=128,
+        retained_token_padding=1,
+    )
+
+    assert kept == [10, 11, 12]
+    assert removed == [13]
+    assert group is not None
+    assert group.block_ids_after == [10, 11, 12]
+    assert group.block_ids_removed == [13]

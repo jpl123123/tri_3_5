@@ -144,6 +144,11 @@ def make_runner_compression_hook(
         budget_total = runtime_ctx.budget_total
         recent_unabsorbed_tokens = runtime_ctx.recent_unabsorbed_tokens
         should_defer_recompress = runtime_ctx.should_defer_recompress
+        retained_token_padding = (
+            0
+            if bool(getattr(signal, "_post_forward", False))
+            else int(runtime_ctx.scheduled_tokens)
+        )
         if log_execution_path and not log_execution_path_core_only:
             _runtime_logger.info(
                 "TRIATTN_EXEC_PATH worker_hook_runtime_context req=%s step=%d "
@@ -296,6 +301,7 @@ def make_runner_compression_hook(
             effective_tokens=effective_tokens,
             budget_total=budget_total,
             block_size=block_size,
+            retained_token_padding=retained_token_padding,
             mutable_block_ids_by_group=mutable_block_ids_by_group,
             group_tensors=group_tensors,
             select_keep_indices=select_keep_indices,
@@ -356,6 +362,8 @@ def make_runner_compression_hook(
             effective_tokens=effective_tokens,
             budget_total=budget_total,
             recent_unabsorbed_tokens=recent_unabsorbed_tokens,
+            retained_cache_len=int(pipeline_out.cache_len_after)
+            + max(0, int(retained_token_padding)),
         )
 
     return _hook

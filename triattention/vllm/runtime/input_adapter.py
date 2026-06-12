@@ -21,6 +21,18 @@ from .input_patch_backend import (
 )
 
 
+def _resolve_active_input_row_map(base_runner: Any) -> tuple[dict[Any, int] | None, str]:
+    input_batch = getattr(base_runner, "input_batch", None)
+    req_id_to_index = (
+        getattr(input_batch, "req_id_to_index", None)
+        if input_batch is not None
+        else None
+    )
+    if isinstance(req_id_to_index, dict) and len(req_id_to_index) > 0:
+        return req_id_to_index, "input_batch"
+    return resolve_req_id_to_index(base_runner)
+
+
 @dataclass(frozen=True)
 class EffectiveInputOverrides:
     seq_base_map: dict[int, int] | None
@@ -68,7 +80,7 @@ def prepare_effective_input_overrides(
 ) -> EffectiveInputOverrides:
     req_states = getattr(base_runner, "req_states", None)
     requests = getattr(base_runner, "requests", None)
-    req_id_to_index, req_index_source = resolve_req_id_to_index(base_runner)
+    req_id_to_index, req_index_source = _resolve_active_input_row_map(base_runner)
     seq_base_map, pos_delta_map, single_seq_base, single_pos_delta = build_effective_sparse_overrides(
         base_runner=base_runner,
         state_store=state_store,

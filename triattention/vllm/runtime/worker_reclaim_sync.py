@@ -182,7 +182,15 @@ def apply_worker_block_reclaim_events(
         if not isinstance(cache_len_after, int) or cache_len_after <= 0:
             continue
 
-        required_blocks = (cache_len_after + block_size - 1) // block_size
+        details = event.get("details")
+        retained_cache_len = (
+            details.get("retained_cache_len")
+            if isinstance(details, dict)
+            else None
+        )
+        if not isinstance(retained_cache_len, int) or retained_cache_len <= 0:
+            retained_cache_len = cache_len_after
+        required_blocks = (retained_cache_len + block_size - 1) // block_size
         reclaim_mode, groups_by_gid = _event_reclaim_groups(event)
 
         for gid, table in enumerate(tables):

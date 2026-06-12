@@ -169,6 +169,7 @@ def execute_group_compaction(
     tasks: list[PreparedLayerCompaction],
     block_size: int,
     total_tokens: int,
+    retained_token_padding: int = 0,
     enable_experimental_block_reclaim: bool,
     require_physical_reclaim: bool,
     shared_compact_fn: Any | None = None,
@@ -207,10 +208,14 @@ def execute_group_compaction(
             normalized_block_ids=normalized_block_ids,
             cache_len_after=cache_len_after,
             block_size=block_size,
+            retained_token_padding=retained_token_padding,
         )
         if require_physical_reclaim:
             before_required = num_required_blocks(total_tokens, block_size)
-            required_blocks = num_required_blocks(cache_len_after, block_size)
+            required_blocks = num_required_blocks(
+                int(cache_len_after) + max(0, int(retained_token_padding)),
+                block_size,
+            )
             expected_removed_min = max(0, before_required - required_blocks)
             if expected_removed_min > 0 and len(removed_block_ids) < expected_removed_min:
                 raise RuntimeError(
@@ -235,8 +240,10 @@ def truncate_tail_reclaim_group(
     normalized_block_ids: list[int],
     cache_len_after: int,
     block_size: int,
+    retained_token_padding: int = 0,
 ) -> tuple[list[int], list[int], ReclaimGroup | None]:
-    required_blocks = num_required_blocks(cache_len_after, block_size)
+    retained_tokens = int(cache_len_after) + max(0, int(retained_token_padding))
+    required_blocks = num_required_blocks(retained_tokens, block_size)
     kept_block_ids = list(normalized_block_ids[:required_blocks])
     removed_block_ids = list(normalized_block_ids[required_blocks:])
     group = None

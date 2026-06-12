@@ -32,6 +32,55 @@ def _debug_preserve_rope_positions() -> bool:
     return os.environ.get("TRIATTN_DEBUG_V1_PRESERVE_ROPE_POSITIONS", "0") == "1"
 
 
+def _validate_expected_v1_batch_mapping(
+    *,
+    req_indices: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    num_reqs: int,
+) -> None:
+    expected_rows = _patch_state.ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU
+    if expected_rows is None:
+        return
+    expected_rows_np = expected_rows.detach().cpu().numpy().astype(np.int64, copy=False)
+    if expected_rows_np.size == 0:
+        return
+    row_mask = (expected_rows_np >= 0) & (expected_rows_np < int(num_reqs))
+    if not np.all(row_mask):
+        raise RuntimeError(
+            "TRIATTN_V1_IDX_MAPPING_MISMATCH:"
+            f"num_reqs={num_reqs}:expected={expected_rows_np.tolist()}"
+        )
+
+    expected_q_lens = _patch_state.ACTIVE_EXPECTED_QUERY_LENS_CPU
+    if expected_q_lens is not None:
+        expected_q_lens_np = (
+            expected_q_lens.detach().cpu().numpy().astype(np.int64, copy=False)
+        )
+        if expected_q_lens_np.shape != expected_rows_np.shape:
+            raise RuntimeError(
+                "TRIATTN_V1_QUERY_LENS_COUNT_MISMATCH:"
+                f"rows={expected_rows_np.tolist()}:qlens={expected_q_lens_np.tolist()}"
+            )
+        actual_q_lens = np.asarray(
+            num_scheduled_tokens[expected_rows_np],
+            dtype=np.int64,
+        )
+        if not np.array_equal(actual_q_lens, expected_q_lens_np):
+            raise RuntimeError(
+                "TRIATTN_V1_QUERY_LENS_MISMATCH:"
+                f"actual={actual_q_lens.tolist()}:expected={expected_q_lens_np.tolist()}"
+            )
+
+    req_indices_i64 = req_indices.astype(np.int64, copy=False)
+    present_rows = set(int(v) for v in np.unique(req_indices_i64).tolist())
+    missing_rows = [int(row) for row in expected_rows_np.tolist() if int(row) not in present_rows]
+    if missing_rows:
+        raise RuntimeError(
+            "TRIATTN_V1_TOKEN_ROW_MAPPING_MISMATCH:"
+            f"missing={missing_rows}:actual={req_indices_i64.tolist()}"
+        )
+
+
 def _build_effective_slot_positions(
     *,
     positions_np: np.ndarray,
@@ -146,6 +195,11 @@ def make_patched_v1_prepare_inputs(
 
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             positions_np = self.positions.np[:total_num_scheduled_tokens]
+            _validate_expected_v1_batch_mapping(
+                req_indices=req_indices,
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_reqs=num_reqs,
+            )
 
             slot_positions_np = _build_effective_slot_positions(
                 positions_np=positions_np,

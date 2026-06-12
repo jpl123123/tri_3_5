@@ -193,6 +193,7 @@ def run_group_compaction_pipeline(
     shared_compact_fn: Callable[..., Any],
     per_head_compact_fn: Callable[..., Any],
     gather_dense_fn: Callable[..., torch.Tensor] | None = None,
+    retained_token_padding: int = 0,
 ) -> GroupPipelineOutcome | dict[str, Any]:
     compacted_any_group = False
     cache_len_after: int | None = None
@@ -387,6 +388,7 @@ def run_group_compaction_pipeline(
                 tasks=prepared_layer_compactions,
                 block_size=block_size,
                 total_tokens=group_total_tokens,
+                retained_token_padding=retained_token_padding,
                 enable_experimental_block_reclaim=config.enable_experimental_block_reclaim,
                 require_physical_reclaim=config.require_physical_reclaim,
                 shared_compact_fn=shared_compact_fn,
@@ -499,6 +501,7 @@ def finalize_hook_placement_result(
     effective_tokens: int,
     budget_total: int,
     recent_unabsorbed_tokens: int | None,
+    retained_cache_len: int | None = None,
 ) -> dict[str, Any]:
     block_reclaim_payload: ReclaimEvent | None = None
     if config.enable_experimental_block_reclaim and outcome.block_reclaim_groups:
@@ -524,6 +527,11 @@ def finalize_hook_placement_result(
         selection_mode=str(outcome.selection_mode),
         effective_tokens_before=int(effective_tokens),
         budget_total=int(budget_total),
+        retained_cache_len=(
+            int(retained_cache_len)
+            if isinstance(retained_cache_len, int)
+            else None
+        ),
         recent_unabsorbed_tokens=(
             int(recent_unabsorbed_tokens)
             if isinstance(recent_unabsorbed_tokens, int)

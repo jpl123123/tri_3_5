@@ -29,6 +29,9 @@ from triattention.vllm.runtime.input_patch_ascend_backend import (
 from triattention.vllm.runtime.input_patch_installer import (
     make_patched_ascend_v1_block_table_get_device_tensor,
 )
+from triattention.vllm.runtime.input_patch_vllm_v1_backend import (
+    make_patched_v1_prepare_inputs,
+)
 
 
 def test_ascend_v2_seq_override_updates_seq_lens_np():
@@ -151,3 +154,49 @@ def test_ascend_v1_block_table_trim_requires_explicit_opt_in(monkeypatch):
     assert input_patch_state.ACTIVE_BLOCK_TABLE_TRIM_BLOCK_SIZE == 128
     assert input_patch_state.ACTIVE_BLOCK_TABLE_TRIM_ORIGINAL_COLS == 10
     assert input_patch_state.ACTIVE_BLOCK_TABLE_TRIM_EFFECTIVE_COLS == 2
+
+
+def test_v1_prepare_inputs_fails_on_stale_expected_batch_row():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=SimpleNamespace(
+                compute_slot_mapping=lambda *args, **kwargs: None,
+                commit_slot_mapping=lambda *args, **kwargs: None,
+            ),
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([4097, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={3: 2048},
+        effective_pos_delta_by_req_idx={3: -2048},
+        expected_req_row_indices=(3,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        try:
+            patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+        except RuntimeError as exc:
+            assert "TRIATTN_V1_IDX_MAPPING_MISMATCH" in str(exc)
+        else:
+            raise AssertionError("stale expected batch row should fail fast")
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
