@@ -331,6 +331,7 @@ def build_effective_sparse_overrides(
             isinstance(_nct_at_comp, int)
             and isinstance(_cla, int)
             and isinstance(_sched_nct, int)
+            and _sched_nct >= _nct_at_comp
         ):
             # Stable path: delta is constant between compressions.
             # effective_before_step = cache_len_after + (current_nct - nct_at_compression)
@@ -339,8 +340,11 @@ def build_effective_sparse_overrides(
             abs_progress = _sched_nct
             delta = int(_cla - _nct_at_comp)
         else:
-            # Fallback: original path for edge cases where compression
-            # state hasn't recorded scheduler_nct yet.
+            # Fallback for edge cases where compression state has no scheduler
+            # anchor, or the scheduler briefly reports a pre-compression progress
+            # value again.  The latter can happen in chunked-prefill/batch-queue
+            # paths; using the compression anchor then would create a negative
+            # effective base even though runner-local current_cache_len is valid.
             abs_progress = _resolve_abs_progress_for_override(
                 req_state=req_state,
                 state=state,
