@@ -312,6 +312,18 @@ def _validate_v1_block_table_bounds(
                     f"blocks={current_blocks}:block_size={block_size}:"
                     f"capacity={capacity}"
                 )
+            if (
+                validate_seq_lens
+                and seq_len is not None
+                and max_slot_position is not None
+                and max_slot_position >= seq_len
+            ):
+                raise RuntimeError(
+                    "TRIATTN_ASCEND_V1_SLOT_POSITION_SEQ_LEN_MISMATCH:"
+                    f"row={row}:gid={gid}:max_slot_position={max_slot_position}:"
+                    f"seq_len={seq_len}:blocks={current_blocks}:"
+                    f"block_size={block_size}:capacity={capacity}"
+                )
             if max_slot_position is not None and max_slot_position >= capacity:
                 raise RuntimeError(
                     "TRIATTN_ASCEND_V1_SLOT_POSITION_OOB:"
@@ -335,11 +347,40 @@ def _build_effective_slot_positions(
     ):
         return None
 
-    # Slot positions may follow the compacted KV layout, but decode-time
-    # RoPE positions must stay in the original logical sequence space.
+    max_row = int(req_indices.max(initial=-1))
+    num_rows = max_row + 1
+
+    if num_rows == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None:
+        base = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE)
+        return base + np.arange(int(positions_np.size), dtype=positions_np.dtype)
+
+    sparse_bases = _remap_by_expected_req_ids(
+        _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX,
+        input_batch=input_batch,
+    )
+    if sparse_bases:
+        out = positions_np.copy()
+        changed = False
+        for req_idx, effective_base in sparse_bases.items():
+            row = int(req_idx)
+            if row < 0 or row >= num_rows:
+                continue
+            token_indices = np.nonzero(req_indices == row)[0]
+            if token_indices.size == 0:
+                continue
+            out[token_indices] = int(effective_base) + np.arange(
+                int(token_indices.size),
+                dtype=positions_np.dtype,
+            )
+            changed = True
+        if changed:
+            return out
+
+    # Fallback for legacy pos-delta-only tests or patched environments where
+    # an effective base is unavailable.
     out = positions_np.copy()
 
-    if int(req_indices.max(initial=-1)) + 1 == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0:
+    if num_rows == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0:
         delta = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
         shifted = out + delta
         np.copyto(out, shifted, where=shifted >= 0)

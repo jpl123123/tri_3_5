@@ -31,6 +31,7 @@ from triattention.vllm.runtime.input_patch_installer import (
     make_patched_ascend_v1_block_table_get_device_tensor,
 )
 from triattention.vllm.runtime.input_patch_vllm_v1_backend import (
+    _validate_v1_block_table_bounds,
     make_patched_v1_prepare_inputs,
 )
 
@@ -249,8 +250,8 @@ def test_v1_prepare_inputs_fails_when_effective_seq_exceeds_block_table_capacity
         try:
             patched(runner, scheduler_output, np.array([1], dtype=np.int32))
         except RuntimeError as exc:
-            assert "TRIATTN_ASCEND_V1_BLOCK_TABLE_CAPACITY_MISMATCH" in str(exc)
-            assert "seq_len=385" in str(exc)
+            assert "TRIATTN_ASCEND_V1_SLOT_POSITION_OOB" in str(exc)
+            assert "max_slot_position=384" in str(exc)
             assert "capacity=384" in str(exc)
         else:
             raise AssertionError("block table capacity mismatch should fail fast")
@@ -299,6 +300,39 @@ def test_v1_prepare_inputs_fails_when_shifted_slot_position_is_out_of_bounds():
             assert "capacity=384" in str(exc)
         else:
             raise AssertionError("slot position capacity mismatch should fail fast")
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+
+def test_v1_block_table_validation_rejects_slot_position_beyond_effective_seq_len():
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx=None,
+        expected_req_row_indices=(0,),
+        expected_query_lens=(4,),
+    )
+
+    try:
+        try:
+            _validate_v1_block_table_bounds(
+                block_table=_V1BlockTable(block_size=128, num_blocks_per_row=(32,)),
+                seq_lens_np=np.array([388], dtype=np.int32),
+                req_indices=np.array([0, 0, 0, 0], dtype=np.int32),
+                slot_positions_np=np.array([2348, 2349, 2350, 2351], dtype=np.int32),
+                num_reqs=1,
+                validate_seq_lens=True,
+            )
+        except RuntimeError as exc:
+            assert "TRIATTN_ASCEND_V1_SLOT_POSITION_SEQ_LEN_MISMATCH" in str(exc)
+            assert "max_slot_position=2351" in str(exc)
+            assert "seq_len=388" in str(exc)
+        else:
+            raise AssertionError("slot positions beyond effective seq_len should fail")
     finally:
         input_patch_state.set_active_effective_overrides_enabled(False)
         input_patch_state.set_active_effective_sparse_overrides(
@@ -440,7 +474,7 @@ def test_v1_prepare_inputs_remaps_overrides_after_input_batch_row_reorder():
     np.testing.assert_array_equal(block_table.compute_calls[0][1], [1024, 384])
 
 
-def test_v1_prepare_inputs_keeps_already_effective_positions_when_shift_would_go_negative():
+def test_v1_prepare_inputs_rebuilds_slot_positions_from_effective_base():
     def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
         del self, scheduler_output, num_scheduled_tokens
         return object()
@@ -483,11 +517,11 @@ def test_v1_prepare_inputs_keeps_already_effective_positions_when_shift_would_go
     assert runner.seq_lens.np[0] == 388
     np.testing.assert_array_equal(
         block_table.compute_calls[0][1],
-        [2348, 2343, 384, 385],
+        [384, 385, 386, 387],
     )
 
 
-def test_v1_prepare_inputs_single_delta_keeps_positions_when_shift_would_go_negative():
+def test_v1_prepare_inputs_single_base_rebuilds_slot_positions():
     def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
         del self, scheduler_output, num_scheduled_tokens
         return object()
@@ -532,5 +566,5 @@ def test_v1_prepare_inputs_single_delta_keeps_positions_when_shift_would_go_nega
     assert runner.seq_lens.np[0] == 387
     np.testing.assert_array_equal(
         block_table.compute_calls[0][1],
-        [2348, 384, 385],
+        [384, 385, 386],
     )
