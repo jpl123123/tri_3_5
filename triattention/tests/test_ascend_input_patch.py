@@ -347,3 +347,145 @@ def test_v1_prepare_inputs_validates_shifted_slot_positions_within_capacity():
     assert runner.seq_lens.np[0] == 385
     assert block_table.commit_calls == [1]
     np.testing.assert_array_equal(block_table.compute_calls[0][1], [384])
+
+
+def test_v1_prepare_inputs_remaps_overrides_after_input_batch_row_reorder():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(4, 4))
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req-b", "req-a"],
+            req_id_to_index={"req-b": 0, "req-a": 1},
+            num_computed_tokens_cpu=np.array([1024, 4096], dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.array([0, 1], dtype=np.int32),
+        positions=SimpleNamespace(np=np.array([1024, 4096], dtype=np.int32)),
+        seq_lens=SimpleNamespace(
+            np=np.array([1025, 4097, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=2)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_req_ids=("req-a",),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1, 1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert runner.seq_lens.np[0] == 1025
+    assert runner.seq_lens.np[1] == 385
+    np.testing.assert_array_equal(block_table.compute_calls[0][1], [1024, 384])
+
+
+def test_v1_prepare_inputs_keeps_already_effective_positions_when_shift_would_go_negative():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(32,))
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(
+            np=np.array([2348, 2343, 4096, 4097], dtype=np.int32)
+        ),
+        seq_lens=SimpleNamespace(
+            np=np.array([4098, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=4)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(4,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([4], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert runner.seq_lens.np[0] == 388
+    np.testing.assert_array_equal(
+        block_table.compute_calls[0][1],
+        [2348, 2343, 384, 385],
+    )
+
+
+def test_v1_prepare_inputs_single_delta_keeps_positions_when_shift_would_go_negative():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(32,))
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.array([0], dtype=np.int32),
+        positions=SimpleNamespace(
+            np=np.array([2348, 4096, 4097], dtype=np.int32)
+        ),
+        seq_lens=SimpleNamespace(
+            np=np.array([4098, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=3)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx=None,
+        effective_pos_delta_by_req_idx=None,
+        single_effective_seq_base=384,
+        single_effective_pos_delta=-3712,
+        expected_req_row_indices=(0,),
+        expected_query_lens=(3,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([3], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert runner.seq_lens.np[0] == 387
+    np.testing.assert_array_equal(
+        block_table.compute_calls[0][1],
+        [2348, 384, 385],
+    )

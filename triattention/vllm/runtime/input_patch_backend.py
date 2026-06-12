@@ -32,6 +32,7 @@ def activate_effective_sparse_overrides(
     single_seq_base: int | None,
     single_pos_delta: int,
     expected_req_row_indices: tuple[int, ...] | None = None,
+    expected_req_ids: tuple[object, ...] | None = None,
     expected_query_lens: tuple[int, ...] | None = None,
     packed_pos_deltas: tuple[int, ...] | None = None,
 ) -> None:
@@ -45,6 +46,7 @@ def activate_effective_sparse_overrides(
         single_effective_seq_base=single_seq_base,
         single_effective_pos_delta=single_pos_delta,
         expected_req_row_indices=expected_req_row_indices,
+        expected_req_ids=expected_req_ids,
         expected_query_lens=expected_query_lens,
         packed_pos_deltas=packed_pos_deltas,
     )
@@ -58,6 +60,7 @@ def clear_effective_overrides() -> None:
         single_effective_seq_base=None,
         single_effective_pos_delta=0,
         expected_req_row_indices=None,
+        expected_req_ids=None,
         expected_query_lens=None,
         packed_pos_deltas=None,
     )

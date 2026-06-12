@@ -24,6 +24,7 @@ ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE: int | None = None
 ACTIVE_SINGLE_EFFECTIVE_POS_DELTA: int = 0
 ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU: torch.Tensor | None = None
 ACTIVE_EXPECTED_REQ_ROW_INDICES_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
+ACTIVE_EXPECTED_REQ_IDS: tuple[object, ...] | None = None
 ACTIVE_EXPECTED_QUERY_LENS_CPU: torch.Tensor | None = None
 ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
 ACTIVE_PACKED_POS_DELTAS_CPU: torch.Tensor | None = None
@@ -158,6 +159,7 @@ def set_active_effective_sparse_overrides(
     single_effective_seq_base: int | None = None,
     single_effective_pos_delta: int = 0,
     expected_req_row_indices: tuple[int, ...] | None = None,
+    expected_req_ids: tuple[object, ...] | None = None,
     expected_query_lens: tuple[int, ...] | None = None,
     packed_pos_deltas: tuple[int, ...] | None = None,
 ) -> None:
@@ -167,6 +169,7 @@ def set_active_effective_sparse_overrides(
     global ACTIVE_EFFECTIVE_BASE_LOOKUP_DEVICE_CACHE, ACTIVE_EFFECTIVE_POS_DELTA_LOOKUP_DEVICE_CACHE
     global ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE, ACTIVE_SINGLE_EFFECTIVE_POS_DELTA
     global ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU, ACTIVE_EXPECTED_REQ_ROW_INDICES_DEVICE_CACHE
+    global ACTIVE_EXPECTED_REQ_IDS
     global ACTIVE_EXPECTED_QUERY_LENS_CPU, ACTIVE_EXPECTED_QUERY_LENS_DEVICE_CACHE
     global ACTIVE_PACKED_POS_DELTAS_CPU, ACTIVE_PACKED_POS_DELTAS_DEVICE_CACHE
     ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX = effective_base_by_req_idx
@@ -191,6 +194,7 @@ def set_active_effective_sparse_overrides(
     else:
         ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU = None
     ACTIVE_EXPECTED_REQ_ROW_INDICES_DEVICE_CACHE = {}
+    ACTIVE_EXPECTED_REQ_IDS = tuple(expected_req_ids) if expected_req_ids else None
     if expected_query_lens:
         ACTIVE_EXPECTED_QUERY_LENS_CPU = torch.as_tensor(
             [int(v) for v in expected_query_lens],

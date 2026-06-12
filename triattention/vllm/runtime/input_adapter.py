@@ -40,6 +40,7 @@ class EffectiveInputOverrides:
     single_seq_base: int | None
     single_pos_delta: int
     expected_req_row_indices: tuple[int, ...] | None = None
+    expected_req_ids: tuple[Any, ...] | None = None
     expected_query_lens: tuple[int, ...] | None = None
     packed_pos_deltas: tuple[int, ...] | None = None
 
@@ -50,6 +51,7 @@ class EffectiveInputOverrides:
             single_seq_base=self.single_seq_base,
             single_pos_delta=self.single_pos_delta,
             expected_req_row_indices=self.expected_req_row_indices,
+            expected_req_ids=self.expected_req_ids,
             expected_query_lens=self.expected_query_lens,
             packed_pos_deltas=self.packed_pos_deltas,
         )
@@ -88,6 +90,7 @@ def prepare_effective_input_overrides(
         compression_events=None,
     )
     expected_req_row_indices: tuple[int, ...] | None = None
+    expected_req_ids: tuple[Any, ...] | None = None
     expected_query_lens: tuple[int, ...] | None = None
     scheduled_items = get_scheduled_token_items(scheduler_output)
     enable_packed_pos_delta = bool(
@@ -95,6 +98,7 @@ def prepare_effective_input_overrides(
     )
     if isinstance(req_id_to_index, dict):
         row_indices: list[int] = []
+        req_ids_for_rows: list[Any] = []
         q_lens: list[int] = []
         packed_deltas: list[int] = []
         sparse_override_req_rows = set(seq_base_map or {})
@@ -111,9 +115,11 @@ def prepare_effective_input_overrides(
             if sparse_override_req_rows and req_idx not in sparse_override_req_rows:
                 continue
             row_indices.append(req_idx)
+            req_ids_for_rows.append(req_id)
             q_lens.append(q_len)
         if row_indices:
             expected_req_row_indices = tuple(row_indices)
+            expected_req_ids = tuple(req_ids_for_rows)
             expected_query_lens = tuple(q_lens)
         packed_pos_deltas = (
             tuple(packed_deltas)
@@ -134,6 +140,7 @@ def prepare_effective_input_overrides(
         single_seq_base=single_seq_base,
         single_pos_delta=single_pos_delta,
         expected_req_row_indices=expected_req_row_indices,
+        expected_req_ids=expected_req_ids,
         expected_query_lens=expected_query_lens,
         packed_pos_deltas=packed_pos_deltas,
     )

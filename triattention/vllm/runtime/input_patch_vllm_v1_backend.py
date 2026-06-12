@@ -37,6 +37,7 @@ def _validate_expected_v1_batch_mapping(
     req_indices: np.ndarray,
     num_scheduled_tokens: np.ndarray,
     num_reqs: int,
+    input_batch: Any | None = None,
 ) -> None:
     expected_rows = _patch_state.ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU
     if expected_rows is None:
@@ -44,6 +45,10 @@ def _validate_expected_v1_batch_mapping(
     expected_rows_np = expected_rows.detach().cpu().numpy().astype(np.int64, copy=False)
     if expected_rows_np.size == 0:
         return
+    expected_rows_np = _remap_expected_rows_by_req_ids(
+        expected_rows_np,
+        input_batch=input_batch,
+    )
     row_mask = (expected_rows_np >= 0) & (expected_rows_np < int(num_reqs))
     if not np.all(row_mask):
         raise RuntimeError(
@@ -81,6 +86,88 @@ def _validate_expected_v1_batch_mapping(
         )
 
 
+def _current_v1_req_id_to_index(input_batch: Any) -> dict[Any, int] | None:
+    req_id_to_index = getattr(input_batch, "req_id_to_index", None)
+    if isinstance(req_id_to_index, dict) and req_id_to_index:
+        return req_id_to_index
+    req_ids_attr = getattr(input_batch, "req_ids", None)
+    try:
+        req_ids = req_ids_attr() if callable(req_ids_attr) else req_ids_attr
+    except Exception:
+        req_ids = None
+    if not isinstance(req_ids, list):
+        req_ids = getattr(input_batch, "_req_ids", None)
+    if not isinstance(req_ids, list):
+        return None
+    out = {
+        req_id: idx
+        for idx, req_id in enumerate(req_ids)
+        if req_id is not None
+    }
+    return out or None
+
+
+def _remap_by_expected_req_ids(
+    values_by_expected_row: dict[int, int] | None,
+    *,
+    input_batch: Any,
+) -> dict[int, int] | None:
+    if not values_by_expected_row:
+        return values_by_expected_row
+    expected_req_ids = _patch_state.ACTIVE_EXPECTED_REQ_IDS
+    expected_rows = _patch_state.ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU
+    if expected_req_ids is None or expected_rows is None:
+        return values_by_expected_row
+    try:
+        expected_rows_np = expected_rows.detach().cpu().numpy().astype(np.int64, copy=False)
+    except Exception:
+        return values_by_expected_row
+    if len(expected_req_ids) != int(expected_rows_np.size):
+        return values_by_expected_row
+    current_map = _current_v1_req_id_to_index(input_batch)
+    if not isinstance(current_map, dict):
+        return values_by_expected_row
+
+    remapped: dict[int, int] = {}
+    changed = False
+    for expected_req_id, expected_row in zip(expected_req_ids, expected_rows_np.tolist()):
+        expected_row_i = int(expected_row)
+        if expected_row_i not in values_by_expected_row:
+            continue
+        current_row = current_map.get(expected_req_id)
+        if not isinstance(current_row, int):
+            continue
+        remapped[int(current_row)] = int(values_by_expected_row[expected_row_i])
+        changed = changed or int(current_row) != expected_row_i
+    if not remapped:
+        return values_by_expected_row
+    return remapped if changed else values_by_expected_row
+
+
+def _remap_expected_rows_by_req_ids(
+    expected_rows_np: np.ndarray,
+    *,
+    input_batch: Any | None,
+) -> np.ndarray:
+    expected_req_ids = _patch_state.ACTIVE_EXPECTED_REQ_IDS
+    if expected_req_ids is None or input_batch is None:
+        return expected_rows_np
+    if len(expected_req_ids) != int(expected_rows_np.size):
+        return expected_rows_np
+    current_map = _current_v1_req_id_to_index(input_batch)
+    if not isinstance(current_map, dict):
+        return expected_rows_np
+    out = expected_rows_np.copy()
+    changed = False
+    for i, expected_req_id in enumerate(expected_req_ids):
+        current_row = current_map.get(expected_req_id)
+        if not isinstance(current_row, int):
+            continue
+        out[i] = int(current_row)
+        changed = True
+    return out if changed else expected_rows_np
+
+
 def _block_table_inner_tables(block_table_obj: Any) -> list[Any]:
     inner_tables = getattr(block_table_obj, "block_tables", None)
     if isinstance(inner_tables, (list, tuple)) and inner_tables:
@@ -109,12 +196,21 @@ def _table_row_block_count(table: Any, row_idx: int) -> int | None:
         return None
 
 
-def _active_override_rows(*, req_indices: np.ndarray, num_reqs: int) -> list[int]:
+def _active_override_rows(
+    *,
+    req_indices: np.ndarray,
+    num_reqs: int,
+    input_batch: Any | None = None,
+) -> list[int]:
     rows: set[int] = set()
     expected_rows = _patch_state.ACTIVE_EXPECTED_REQ_ROW_INDICES_CPU
     if expected_rows is not None:
         try:
             expected_np = expected_rows.detach().cpu().numpy().astype(np.int64, copy=False)
+            expected_np = _remap_expected_rows_by_req_ids(
+                expected_np,
+                input_batch=input_batch,
+            )
             rows.update(
                 int(row)
                 for row in expected_np.tolist()
@@ -129,8 +225,14 @@ def _active_override_rows(*, req_indices: np.ndarray, num_reqs: int) -> list[int
         rows.add(0)
 
     for mapping in (
-        _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX,
-        _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX,
+        _remap_by_expected_req_ids(
+            _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX,
+            input_batch=input_batch,
+        ),
+        _remap_by_expected_req_ids(
+            _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX,
+            input_batch=input_batch,
+        ),
     ):
         if not mapping:
             continue
@@ -159,18 +261,27 @@ def _validate_v1_block_table_bounds(
     slot_positions_np: np.ndarray | None,
     num_reqs: int,
     validate_seq_lens: bool,
+    input_batch: Any | None = None,
 ) -> None:
     if block_table is None or num_reqs <= 0:
         return
     tables = _block_table_inner_tables(block_table)
-    rows = _active_override_rows(req_indices=req_indices, num_reqs=num_reqs)
+    rows = _active_override_rows(
+        req_indices=req_indices,
+        num_reqs=num_reqs,
+        input_batch=input_batch,
+    )
     if not tables or not rows:
         return
 
     if slot_positions_np is not None and np.any(slot_positions_np < 0):
+        negatives = slot_positions_np[slot_positions_np < 0]
+        sample = negatives[:16].astype(np.int64, copy=False).tolist()
         raise RuntimeError(
             "TRIATTN_ASCEND_V1_SLOT_POSITION_NEGATIVE:"
-            f"positions={slot_positions_np.astype(np.int64, copy=False).tolist()}"
+            f"min={int(negatives.min(initial=0))}:sample={sample}:"
+            f"negative_count={int(negatives.size)}:"
+            f"total={int(slot_positions_np.size)}"
         )
 
     req_indices_i64 = req_indices.astype(np.int64, copy=False)
@@ -213,6 +324,7 @@ def _build_effective_slot_positions(
     *,
     positions_np: np.ndarray,
     req_indices: np.ndarray,
+    input_batch: Any | None = None,
 ) -> np.ndarray | None:
     if _debug_drop_pos_delta():
         return None
@@ -227,10 +339,15 @@ def _build_effective_slot_positions(
     out = positions_np.copy()
 
     if int(req_indices.max(initial=-1)) + 1 == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0:
-        out += int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
+        delta = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
+        shifted = out + delta
+        np.copyto(out, shifted, where=shifted >= 0)
         return out
 
-    sparse_pos_deltas = _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX
+    sparse_pos_deltas = _remap_by_expected_req_ids(
+        _patch_state.ACTIVE_EFFECTIVE_POS_DELTA_BY_REQ_IDX,
+        input_batch=input_batch,
+    )
     if not sparse_pos_deltas:
         return None
 
@@ -238,7 +355,9 @@ def _build_effective_slot_positions(
     for req_idx, delta in sparse_pos_deltas.items():
         if 0 <= int(req_idx) < row_deltas.shape[0]:
             row_deltas[int(req_idx)] = int(delta)
-    out += row_deltas[req_indices]
+    deltas = row_deltas[req_indices]
+    shifted = out + deltas
+    np.copyto(out, shifted, where=shifted >= 0)
     return out
 
 
@@ -248,6 +367,7 @@ def _apply_sparse_seq_len_overrides_in_place(
     num_computed_tokens_cpu: np.ndarray,
     num_scheduled_tokens: np.ndarray,
     num_reqs: int,
+    input_batch: Any | None = None,
 ) -> bool:
     if _debug_drop_seq_base():
         return False
@@ -259,7 +379,10 @@ def _apply_sparse_seq_len_overrides_in_place(
         seq_lens_np[0] = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE) + int(num_scheduled_tokens[0])
         return True
 
-    sparse_bases = _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX
+    sparse_bases = _remap_by_expected_req_ids(
+        _patch_state.ACTIVE_EFFECTIVE_BASE_BY_REQ_IDX,
+        input_batch=input_batch,
+    )
     if not sparse_bases:
         return False
 
@@ -328,11 +451,13 @@ def make_patched_v1_prepare_inputs(
                 req_indices=req_indices,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_reqs=num_reqs,
+                input_batch=self.input_batch,
             )
 
             slot_positions_np = _build_effective_slot_positions(
                 positions_np=positions_np,
                 req_indices=req_indices,
+                input_batch=self.input_batch,
             )
             if slot_positions_np is not None:
                 _validate_v1_block_table_bounds(
@@ -342,6 +467,7 @@ def make_patched_v1_prepare_inputs(
                     slot_positions_np=slot_positions_np,
                     num_reqs=num_reqs,
                     validate_seq_lens=False,
+                    input_batch=self.input_batch,
                 )
                 self.input_batch.block_table.compute_slot_mapping(req_indices, slot_positions_np)
                 self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
@@ -351,6 +477,7 @@ def make_patched_v1_prepare_inputs(
                 num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_reqs=num_reqs,
+                input_batch=self.input_batch,
             )
             if seq_applied:
                 self.seq_lens.np[num_reqs:].fill(0)
@@ -370,6 +497,7 @@ def make_patched_v1_prepare_inputs(
                     slot_positions_np=None,
                     num_reqs=num_reqs,
                     validate_seq_lens=seq_applied,
+                    input_batch=self.input_batch,
                 )
 
             return out
