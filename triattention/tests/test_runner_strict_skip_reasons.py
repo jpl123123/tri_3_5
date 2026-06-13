@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 from triattention.vllm.runtime.executor import CompressionExecutionResult
 from triattention.vllm.runtime.runner_compression_actions import (
     execute_runner_compression_actions,
 )
 from triattention.vllm.runtime.signals import CompressionSignal
+from triattention.vllm.runtime.state import RequestStateStore
 
 
 class _Executor:
@@ -16,6 +19,16 @@ class _Executor:
             applied=False,
             reason=self.reason,
             cache_len_after=4096,
+        )
+
+
+class _AppliedExecutor:
+    def execute(self, *, req_id, signal, scheduler_output):
+        return CompressionExecutionResult(
+            applied=True,
+            reason="applied",
+            cache_len_after=4096,
+            details={"retained_cache_len": 4225},
         )
 
 
@@ -243,3 +256,43 @@ def test_max_compressions_per_step_delays_excess_requests():
     assert [event["reason"] for event in events].count("compression_step_limited") == 2
     assert state_store.skipped_by_req["req-2"]["reason"] == "compression_step_limited"
     assert state_store.skipped_by_req["req-3"]["reason"] == "compression_step_limited"
+
+
+def test_applied_compression_event_records_scheduler_nct_anchor():
+    state_store = RequestStateStore()
+    state_store.ensure("req-1", prefill_len=32383, protect_prefill=False)
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=32384,
+        step=17,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=32383,
+        scheduled_tokens=1,
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[32383],
+        ),
+    )
+
+    events = execute_runner_compression_actions(
+        executor=_AppliedExecutor(),
+        state_store=state_store,
+        scheduler_output=scheduler_output,
+        signals={"req-1": signal},
+        strict_no_downgrade=False,
+        allowed_strict_skip_reasons=set(),
+        logger=_Logger(),
+        log_decisions=False,
+    )
+
+    state = state_store.get("req-1")
+    assert events[0]["cache_len_after"] == 4096
+    assert events[0]["scheduler_nct"] == 32383
+    assert state is not None
+    assert state.cache_len_after_last_compression == 4096
+    assert state.current_cache_len == 4097

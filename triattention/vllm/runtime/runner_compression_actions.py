@@ -307,6 +307,7 @@ def execute_runner_compression_actions(
                     "status": "applied",
                     "reason": result.reason,
                     "cache_len_after": cache_len_after,
+                    "scheduler_nct": _sched_nct,
                     "details": result.details,
                     "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
                     "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),

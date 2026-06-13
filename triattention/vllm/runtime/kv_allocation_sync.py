@@ -58,6 +58,23 @@ def update_request_effective_kv_offset(
     return offset
 
 
+def resolve_current_effective_cache_len(
+    *,
+    cache_len_after: int,
+    scheduler_nct: int | None,
+    num_computed_tokens: int,
+    scheduled_tokens: int,
+) -> int:
+    """Resolve effective cache length at the scheduler event-consumption time."""
+    cache_len_i = max(0, int(cache_len_after))
+    current_nct = max(0, int(num_computed_tokens))
+    if scheduler_nct is not None:
+        scheduler_nct_i = max(0, int(scheduler_nct))
+        if current_nct >= scheduler_nct_i:
+            return cache_len_i + current_nct - scheduler_nct_i
+    return cache_len_i + max(0, int(scheduled_tokens))
+
+
 def prepare_request_effective_num_computed(request: Any) -> int | None:
     """Refresh request effective-num-computed marker for the current schedule step."""
     if request is None:

@@ -184,3 +184,39 @@ def test_effective_overrides_ignore_compression_anchor_after_scheduler_nct_rollb
     assert overrides.seq_base_map == {0: 384}
     assert overrides.pos_delta_map == {0: -7008}
     assert overrides.single_seq_base == 384
+
+
+def test_effective_overrides_keep_full_budget_after_decode_compression():
+    state_store = RequestStateStore()
+    state_store.ensure("req-1", prefill_len=32383, protect_prefill=False)
+    state_store.mark_compressed(
+        "req-1",
+        step=17,
+        cache_len=4096,
+        scheduled_tokens=1,
+        scheduler_nct=32383,
+    )
+    base_runner = SimpleNamespace(
+        req_states=SimpleNamespace(req_id_to_index={"req-1": 0}),
+        input_batch=SimpleNamespace(req_id_to_index={"req-1": 0}),
+        requests={"req-1": SimpleNamespace(num_computed_tokens=32639)},
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req-1": 1},
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[32639],
+        ),
+        triattention_step=273,
+    )
+
+    overrides = prepare_effective_input_overrides(
+        base_runner=base_runner,
+        state_store=state_store,
+        scheduler_output=scheduler_output,
+        config=TriAttentionRuntimeConfig(),
+    )
+
+    assert overrides.seq_base_map == {0: 4352}
+    assert overrides.pos_delta_map == {0: -28287}
+    assert overrides.single_seq_base == 4352

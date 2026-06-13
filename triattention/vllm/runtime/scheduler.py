@@ -20,6 +20,7 @@ from .fast_recency_guard import should_guard_fast_recency_long_context
 from .kv_allocation_sync import (
     clear_request_allocation_sync_state,
     prepare_request_effective_num_computed,
+    resolve_current_effective_cache_len,
     update_request_effective_kv_offset,
 )
 from .planner import CompressionPlanner
@@ -601,6 +602,9 @@ class TriAttentionScheduler(Scheduler):
             cache_len_after = event.get("cache_len_after")
             if not isinstance(cache_len_after, int):
                 continue
+            effective_cache_len_after = event.get("effective_cache_len_after")
+            if not isinstance(effective_cache_len_after, int):
+                effective_cache_len_after = cache_len_after
             req = self.requests.get(req_id)
             if req is None:
                 continue
@@ -612,6 +616,13 @@ class TriAttentionScheduler(Scheduler):
                     prefill_len = 0
             scheduled_tokens = int(event.get("scheduled_tokens", 1) or 1)
             num_computed_tokens = int(getattr(req, "num_computed_tokens", 0) or 0)
+            scheduler_nct = event.get("scheduler_nct")
+            effective_cache_len_current = resolve_current_effective_cache_len(
+                cache_len_after=effective_cache_len_after,
+                scheduler_nct=scheduler_nct if isinstance(scheduler_nct, int) else None,
+                num_computed_tokens=num_computed_tokens,
+                scheduled_tokens=scheduled_tokens,
+            )
             if (
                 scheduled_tokens > 1
                 or (prefill_len > 0 and num_computed_tokens < prefill_len)
@@ -621,10 +632,14 @@ class TriAttentionScheduler(Scheduler):
                 )
             self._effective_len_tracker.apply_compression(
                 req_id=req_id,
-                cache_len_after=cache_len_after,
+                cache_len_after=effective_cache_len_current,
                 num_computed_tokens=req.num_computed_tokens,
             )
             self._last_signal_log_steps.pop(req_id, None)
+            update_request_effective_kv_offset(
+                request=req,
+                cache_len_after=effective_cache_len_current,
+            )
 
             _evt_scheduled = int(event.get("scheduled_tokens", 1))
             if not self.triattention_config.enable_experimental_block_reclaim:
@@ -709,7 +724,7 @@ class TriAttentionScheduler(Scheduler):
                 if reclaim_applied_any:
                     update_request_effective_kv_offset(
                         request=req,
-                        cache_len_after=cache_len_after,
+                        cache_len_after=effective_cache_len_current,
                     )
                 continue
             if not isinstance(managers, (list, tuple)):
@@ -877,7 +892,7 @@ class TriAttentionScheduler(Scheduler):
             if reclaim_applied_any:
                 update_request_effective_kv_offset(
                     request=req,
-                    cache_len_after=cache_len_after,
+                    cache_len_after=effective_cache_len_current,
                 )
 
     def update_from_output(
