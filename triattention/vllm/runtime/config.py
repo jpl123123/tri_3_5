@@ -98,7 +98,8 @@ class TriAttentionRuntimeConfig:
     auto_fast_recency_on_ascend: bool = True
     early_install_proxy_on_ascend: bool = True
     preinstall_input_patch: bool = True
-    force_eager_multi_req_on_ascend_effective_overrides: bool = True
+    force_eager_multi_req_on_ascend_effective_overrides: bool = False
+    max_compressions_per_step_on_ascend: int = 4
 
     # Optional TriAttention-style scoring path (used by runtime hook when enabled).
     sparse_stats_path: Path | None = None
@@ -354,6 +355,10 @@ class TriAttentionRuntimeConfig:
                 "FORCE_EAGER_MULTI_REQ_ON_ASCEND_EFFECTIVE_OVERRIDES",
                 cls.force_eager_multi_req_on_ascend_effective_overrides,
             ),
+            max_compressions_per_step_on_ascend=maybe_int(
+                "MAX_COMPRESSIONS_PER_STEP_ON_ASCEND",
+                cls.max_compressions_per_step_on_ascend,
+            ),
             sparse_stats_path=sparse_stats_path_candidate,
             model_path=Path(model_path_raw) if model_path_raw else None,
             pruning_mode=maybe_str("PRUNING_MODE", cls.pruning_mode) or cls.pruning_mode,
@@ -523,6 +528,11 @@ class TriAttentionRuntimeConfig:
             raise ValueError(
                 "prefill_max_compressions_on_ascend must be >= 0, "
                 f"got {self.prefill_max_compressions_on_ascend}"
+            )
+        if self.max_compressions_per_step_on_ascend < 0:
+            raise ValueError(
+                "max_compressions_per_step_on_ascend must be >= 0, "
+                f"got {self.max_compressions_per_step_on_ascend}"
             )
         if self.score_chunk_max_tokens < 1:
             raise ValueError(

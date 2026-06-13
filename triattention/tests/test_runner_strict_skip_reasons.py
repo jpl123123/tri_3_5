@@ -8,8 +8,10 @@ from triattention.vllm.runtime.signals import CompressionSignal
 class _Executor:
     def __init__(self, reason="zero_copy_recency_not_ready"):
         self.reason = reason
+        self.calls = []
 
     def execute(self, *, req_id, signal, scheduler_output):
+        self.calls.append(req_id)
         return CompressionExecutionResult(
             applied=False,
             reason=self.reason,
@@ -18,8 +20,12 @@ class _Executor:
 
 
 class _StateStore:
+    def __init__(self):
+        self.skipped_by_req = {}
+
     def mark_compression_skipped(self, **kwargs):
         self.skipped = kwargs
+        self.skipped_by_req[kwargs["req_id"]] = kwargs
 
 
 class _Logger:
@@ -201,3 +207,39 @@ def test_core_only_execution_path_suppresses_noisy_zero_copy_skip_logs():
 
     assert events[0]["reason"] == "zero_copy_recency_not_ready"
     assert logger.lines == []
+
+
+def test_max_compressions_per_step_delays_excess_requests():
+    state_store = _StateStore()
+    executor = _Executor(reason="under_budget")
+    signals = {}
+    for idx in range(4):
+        req_id = f"req-{idx}"
+        signals[req_id] = CompressionSignal(
+            req_id=req_id,
+            should_compress=True,
+            reason="length_threshold",
+            estimated_cache_len=4096,
+            step=9,
+            kv_usage=None,
+            protect_prefill=False,
+            prefill_len=10000,
+            scheduled_tokens=1,
+        )
+
+    events = execute_runner_compression_actions(
+        executor=executor,
+        state_store=state_store,
+        scheduler_output=object(),
+        signals=signals,
+        strict_no_downgrade=False,
+        allowed_strict_skip_reasons=set(),
+        logger=_Logger(),
+        log_decisions=False,
+        max_compressions_per_step=2,
+    )
+
+    assert executor.calls == ["req-0", "req-1"]
+    assert [event["reason"] for event in events].count("compression_step_limited") == 2
+    assert state_store.skipped_by_req["req-2"]["reason"] == "compression_step_limited"
+    assert state_store.skipped_by_req["req-3"]["reason"] == "compression_step_limited"

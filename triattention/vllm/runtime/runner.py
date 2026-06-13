@@ -903,6 +903,14 @@ class TriAttentionModelRunner:
                 self._log_execution_path
                 and getattr(self.config, "log_selector_debug", False)
             ),
+            max_compressions_per_step=(
+                int(getattr(self.config, "max_compressions_per_step_on_ascend", 0) or 0)
+                if (
+                    is_ascend_runtime(self._base_runner)
+                    or is_ascend_environment_available()
+                )
+                else 0
+            ),
         )
 
     def _apply_worker_block_reclaim_events(self) -> None:

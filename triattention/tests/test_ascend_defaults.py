@@ -232,3 +232,30 @@ def test_early_install_proxy_on_ascend_defaults_to_eager():
 
 def test_fast_recency_long_context_guard_defaults_to_core_entry():
     assert not TriAttentionRuntimeConfig().fast_recency_long_context_guard
+
+
+def test_multi_req_effective_overrides_keep_graph_by_default():
+    assert not TriAttentionRuntimeConfig().force_eager_multi_req_on_ascend_effective_overrides
+
+
+def test_max_compressions_per_step_on_ascend_default_limits_bursts():
+    assert TriAttentionRuntimeConfig().max_compressions_per_step_on_ascend == 4
+
+
+def test_max_compressions_per_step_on_ascend_from_env(monkeypatch):
+    monkeypatch.setenv("TRIATTN_RUNTIME_MAX_COMPRESSIONS_PER_STEP_ON_ASCEND", "8")
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.max_compressions_per_step_on_ascend == 8
+
+
+def test_multi_req_effective_override_guard_from_env(monkeypatch):
+    monkeypatch.setenv(
+        "TRIATTN_RUNTIME_FORCE_EAGER_MULTI_REQ_ON_ASCEND_EFFECTIVE_OVERRIDES",
+        "1",
+    )
+
+    config = TriAttentionRuntimeConfig.from_env()
+
+    assert config.force_eager_multi_req_on_ascend_effective_overrides

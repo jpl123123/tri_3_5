@@ -52,7 +52,19 @@ def _overrides():
     )
 
 
-def test_ascend_multi_req_effective_overrides_enable_graph_guard():
+def test_ascend_multi_req_effective_overrides_keep_graph_by_default():
+    base_runner = _AscendRunner()
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"a": 1, "b": 1})
+
+    assert not bridge._should_guard_ascend_multi_req_effective_overrides(
+        base_runner=base_runner,
+        scheduler_output=scheduler_output,
+        overrides=_overrides(),
+        config=TriAttentionRuntimeConfig(),
+    )
+
+
+def test_ascend_multi_req_effective_overrides_can_force_eager_guard():
     base_runner = _AscendRunner()
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"a": 1, "b": 1})
 
@@ -60,7 +72,9 @@ def test_ascend_multi_req_effective_overrides_enable_graph_guard():
         base_runner=base_runner,
         scheduler_output=scheduler_output,
         overrides=_overrides(),
-        config=TriAttentionRuntimeConfig(),
+        config=TriAttentionRuntimeConfig(
+            force_eager_multi_req_on_ascend_effective_overrides=True,
+        ),
     )
 
 

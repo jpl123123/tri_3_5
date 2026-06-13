@@ -7,6 +7,25 @@ from .constants import TRITON_SCORING_REQUIRED_MARKER
 from .signals import CompressionSignal
 
 
+def _limited_signal_items(
+    signals: dict[str, CompressionSignal],
+    max_compressions_per_step: int,
+) -> tuple[list[tuple[str, CompressionSignal]], list[str]]:
+    compressing: list[tuple[str, CompressionSignal]] = []
+    delayed: list[str] = []
+    remaining = max(0, int(max_compressions_per_step))
+    for req_id, signal in signals.items():
+        if not signal.should_compress:
+            continue
+        if max_compressions_per_step > 0 and remaining <= 0:
+            delayed.append(req_id)
+            continue
+        compressing.append((req_id, signal))
+        if max_compressions_per_step > 0:
+            remaining -= 1
+    return compressing, delayed
+
+
 def execute_runner_compression_actions(
     *,
     executor: Any,
@@ -22,6 +41,7 @@ def execute_runner_compression_actions(
     log_execution_path: bool = False,
     log_execution_path_core_only: bool = False,
     log_selector_debug: bool = False,
+    max_compressions_per_step: int = 0,
 ) -> list[dict[str, Any]]:
     """Execute compression for triggered requests and emit scheduler-side events."""
     events: list[dict[str, Any]] = []
@@ -34,10 +54,34 @@ def execute_runner_compression_actions(
         "zero_copy_recency_not_ready",
         "fast_recency_long_context_guard",
         "initial_decode_grace",
+        "compression_step_limited",
     }
-    for req_id, signal in signals.items():
-        if not signal.should_compress:
-            continue
+    signal_items, delayed_req_ids = _limited_signal_items(
+        signals,
+        max_compressions_per_step=max_compressions_per_step,
+    )
+    for req_id in delayed_req_ids:
+        signal = signals[req_id]
+        if hasattr(state_store, "mark_compression_skipped"):
+            state_store.mark_compression_skipped(
+                req_id=req_id,
+                reason="compression_step_limited",
+                step=signal.step,
+            )
+        events.append(
+            {
+                "req_id": req_id,
+                "step": signal.step,
+                "status": "skipped",
+                "reason": "compression_step_limited",
+                "cache_len_after": None,
+                "details": {"max_compressions_per_step": max_compressions_per_step},
+                "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
+                "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
+                "prefill_len": int(getattr(signal, "prefill_len", 0)),
+            }
+        )
+    for req_id, signal in signal_items:
         # Guard against V1 batch-queue race: scheduler may emit consecutive
         # compression signals for the same request before update_from_output
         # runs.  The worker-side block table was already shrunk by the first
