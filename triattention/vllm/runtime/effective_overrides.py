@@ -359,11 +359,12 @@ def build_effective_sparse_overrides(
                 scheduler_step=scheduler_step,
             )
             delta = int(effective_before_step - abs_progress)
-        if delta == 0:
+        if delta >= 0:
             continue
-        # Sparse overrides only need rows whose effective base differs from the
-        # original vLLM absolute progress. Zero-delta rows can safely fall back
-        # to the unmodified base implementation outputs.
+        # Sparse overrides only need rows whose effective cache is shorter than
+        # the original vLLM absolute progress. Zero/positive deltas must keep
+        # native slot mapping semantics; applying them would move slots beyond
+        # the worker block-table capacity instead of reflecting compression.
         seq_bases[req_idx] = effective_before_step
         pos_deltas[req_idx] = delta
 

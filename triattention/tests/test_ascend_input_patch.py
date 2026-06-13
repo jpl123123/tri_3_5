@@ -568,3 +568,62 @@ def test_v1_prepare_inputs_single_base_rebuilds_slot_positions():
         block_table.compute_calls[0][1],
         [384, 385, 386],
     )
+
+
+def test_v1_prepare_inputs_ignores_positive_pos_delta_in_mixed_batch():
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTable(
+        block_size=128,
+        num_blocks_per_row=(64, 64, 64, 64, 32),
+    )
+    positions = np.concatenate(
+        [
+            np.array([33949, 36299, 35128, 34789], dtype=np.int32),
+            np.arange(2044, 4088, dtype=np.int32),
+        ]
+    )
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=5,
+            num_computed_tokens_cpu=np.array(
+                [33949, 36299, 35128, 34789, 2044],
+                dtype=np.int32,
+            ),
+            block_table=block_table,
+        ),
+        arange_np=np.arange(5, dtype=np.int32),
+        positions=SimpleNamespace(np=positions),
+        seq_lens=SimpleNamespace(
+            np=np.array([33950, 36300, 35129, 34790, 4088, 0], dtype=np.int32),
+            copy_to_gpu=lambda: None,
+        ),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=int(positions.size))
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={4: 2193},
+        effective_pos_delta_by_req_idx={4: 149},
+        expected_req_row_indices=(4,),
+        expected_query_lens=(2044,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(
+            runner,
+            scheduler_output,
+            np.array([1, 1, 1, 1, 2044], dtype=np.int32),
+        )
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    assert block_table.compute_calls == []
+    assert block_table.commit_calls == []
+    assert runner.seq_lens.np[4] == 4088

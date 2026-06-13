@@ -222,6 +222,43 @@ def test_effective_overrides_keep_full_budget_after_decode_compression():
     assert overrides.single_seq_base == 4352
 
 
+def test_effective_overrides_skip_positive_delta_from_stale_compression_anchor():
+    state_store = RequestStateStore()
+    state_store.ensure("req-1", prefill_len=4096, protect_prefill=False)
+    state_store.mark_compressed(
+        "req-1",
+        step=17,
+        cache_len=4237,
+        scheduled_tokens=1,
+        scheduler_nct=4088,
+    )
+    base_runner = SimpleNamespace(
+        req_states=SimpleNamespace(req_id_to_index={"req-1": 0}),
+        input_batch=SimpleNamespace(req_id_to_index={"req-1": 0}),
+        requests={"req-1": SimpleNamespace(num_computed_tokens=4088)},
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req-1": 1},
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[4088],
+        ),
+        triattention_step=18,
+    )
+
+    overrides = prepare_effective_input_overrides(
+        base_runner=base_runner,
+        state_store=state_store,
+        scheduler_output=scheduler_output,
+        config=TriAttentionRuntimeConfig(),
+    )
+
+    assert overrides.seq_base_map is None
+    assert overrides.pos_delta_map is None
+    assert overrides.single_seq_base is None
+    assert overrides.single_pos_delta == 0
+
+
 def test_execute_model_none_keeps_events_for_sample_tokens_output():
     event = {
         "status": "applied",

@@ -352,6 +352,8 @@ def _build_effective_slot_positions(
 
     if num_rows == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None:
         base = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE)
+        if base >= int(positions_np[0]):
+            return None
         return base + np.arange(int(positions_np.size), dtype=positions_np.dtype)
 
     sparse_bases = _remap_by_expected_req_ids(
@@ -368,6 +370,8 @@ def _build_effective_slot_positions(
             token_indices = np.nonzero(req_indices == row)[0]
             if token_indices.size == 0:
                 continue
+            if int(effective_base) >= int(positions_np[token_indices[0]]):
+                continue
             out[token_indices] = int(effective_base) + np.arange(
                 int(token_indices.size),
                 dtype=positions_np.dtype,
@@ -382,6 +386,8 @@ def _build_effective_slot_positions(
 
     if num_rows == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA != 0:
         delta = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_POS_DELTA)
+        if delta >= 0:
+            return None
         shifted = out + delta
         np.copyto(out, shifted, where=shifted >= 0)
         return out
@@ -395,8 +401,13 @@ def _build_effective_slot_positions(
 
     row_deltas = np.zeros(int(req_indices.max()) + 1, dtype=positions_np.dtype)
     for req_idx, delta in sparse_pos_deltas.items():
+        delta_i = int(delta)
+        if delta_i >= 0:
+            continue
         if 0 <= int(req_idx) < row_deltas.shape[0]:
-            row_deltas[int(req_idx)] = int(delta)
+            row_deltas[int(req_idx)] = delta_i
+    if not bool(np.any(row_deltas)):
+        return None
     deltas = row_deltas[req_indices]
     shifted = out + deltas
     np.copyto(out, shifted, where=shifted >= 0)
@@ -418,7 +429,10 @@ def _apply_sparse_seq_len_overrides_in_place(
 
     applied = False
     if num_reqs == 1 and _patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE is not None:
-        seq_lens_np[0] = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE) + int(num_scheduled_tokens[0])
+        base = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE)
+        if base >= int(num_computed_tokens_cpu[0]):
+            return False
+        seq_lens_np[0] = base + int(num_scheduled_tokens[0])
         return True
 
     sparse_bases = _remap_by_expected_req_ids(
@@ -431,7 +445,7 @@ def _apply_sparse_seq_len_overrides_in_place(
     seq_lens_np[:num_reqs] = num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens[:num_reqs]
     for req_idx, effective_base in sparse_bases.items():
         idx = int(req_idx)
-        if 0 <= idx < num_reqs:
+        if 0 <= idx < num_reqs and int(effective_base) < int(num_computed_tokens_cpu[idx]):
             seq_lens_np[idx] = int(effective_base) + int(num_scheduled_tokens[idx])
             applied = True
     return applied
