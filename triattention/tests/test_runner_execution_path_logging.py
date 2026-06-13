@@ -153,7 +153,15 @@ class _PatchTable:
         self.num_blocks_per_row = np.array([current_blocks], dtype=np.int32)
 
 
-def _runner_for_scheduler_output_patch(*, tables, log_decisions=False):
+def _runner_for_scheduler_output_patch(
+    *,
+    tables,
+    log_decisions=False,
+    prefill_len=4096,
+    cache_len_after=256,
+    compression_scheduler_nct=4096,
+    retained_cache_len=257,
+):
     base_runner = types.SimpleNamespace(
         cache_config=types.SimpleNamespace(block_size=128),
         input_batch=types.SimpleNamespace(
@@ -162,13 +170,13 @@ def _runner_for_scheduler_output_patch(*, tables, log_decisions=False):
         ),
     )
     state_store = RequestStateStore()
-    state_store.ensure("req-1", prefill_len=4096, protect_prefill=False)
+    state_store.ensure("req-1", prefill_len=prefill_len, protect_prefill=False)
     state_store.mark_compressed(
         "req-1",
         step=7,
-        cache_len=256,
+        cache_len=cache_len_after,
         scheduled_tokens=1,
-        scheduler_nct=4096,
+        scheduler_nct=compression_scheduler_nct,
     )
     runner = object.__new__(TriAttentionModelRunner)
     runner._base_runner = base_runner
@@ -179,8 +187,8 @@ def _runner_for_scheduler_output_patch(*, tables, log_decisions=False):
         {
             "status": "applied",
             "req_id": "req-1",
-            "cache_len_after": 256,
-            "details": {"retained_cache_len": 257},
+            "cache_len_after": cache_len_after,
+            "details": {"retained_cache_len": retained_cache_len},
         }
     ]
     return runner
@@ -222,3 +230,35 @@ def test_scheduler_output_patch_keeps_only_blocks_needed_for_retained_cache_len(
     runner._patch_scheduler_output_for_compressed_reqs(scheduler_output)
 
     assert scheduler_output.scheduled_cached_reqs.new_block_ids == [([99], [199])]
+
+
+def test_scheduler_output_patch_preserves_decode_growth_after_compression_anchor():
+    runner = _runner_for_scheduler_output_patch(
+        tables=[
+            _PatchTable(current_blocks=32, max_blocks=64),
+            _PatchTable(current_blocks=32, max_blocks=64),
+        ],
+        prefill_len=32768,
+        cache_len_after=4096,
+        compression_scheduler_nct=32768,
+        retained_cache_len=4096,
+    )
+    scheduler_output = types.SimpleNamespace(
+        num_scheduled_tokens={"req-1": 1},
+        scheduled_cached_reqs=types.SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[33393],
+            new_block_ids=[
+                (
+                    [90, 91, 92, 93, 94, 95],
+                    [190, 191, 192, 193, 194, 195],
+                )
+            ],
+        ),
+    )
+
+    runner._patch_scheduler_output_for_compressed_reqs(scheduler_output)
+
+    assert scheduler_output.scheduled_cached_reqs.new_block_ids == [
+        ([90, 91, 92, 93, 94], [190, 191, 192, 193, 194])
+    ]

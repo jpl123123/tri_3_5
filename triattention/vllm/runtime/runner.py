@@ -925,8 +925,9 @@ class TriAttentionModelRunner:
 
         After compression, the worker's block table has been shrunk via
         worker_reclaim_sync.  But the scheduler may still send excess
-        new_block_ids based on its stale view.  This trims those to match the
-        just-retained cache length and then applies the worker row capacity cap.
+        new_block_ids based on its stale view.  This trims stale excess while
+        preserving the blocks needed for this step's effective positions, then
+        applies the worker row capacity cap.
         """
         cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
         if cached_reqs is None:
@@ -958,8 +959,62 @@ class TriAttentionModelRunner:
         events_by_req_id = _applied_compression_events_by_req_id(
             self._pending_compression_events
         )
+        scheduled_tokens_by_req_id: dict[Any, int] = {
+            req_id: max(0, int(scheduled_tokens))
+            for _raw_key, req_id, scheduled_tokens in get_scheduled_token_items(scheduler_output)
+        }
+        scheduler_nct_by_req_id: dict[Any, int] = {}
+        nct_list = getattr(cached_reqs, "num_computed_tokens", None)
+        if isinstance(nct_list, list) and len(nct_list) == len(req_ids):
+            for req_id, raw_nct in zip(req_ids, nct_list):
+                nct = _safe_int(raw_nct)
+                if nct is not None:
+                    scheduler_nct_by_req_id[req_id] = nct
 
-        def _group_limits_for_event(req_index: int, retained_cache_len: int | None) -> list[int | None]:
+        def _required_blocks_after_step(
+            *,
+            req_id: Any,
+            retained_cache_len: int | None,
+            block_size: int,
+        ) -> int | None:
+            scheduled_tokens = scheduled_tokens_by_req_id.get(req_id, 0)
+            rt_state = self.state_store.get(req_id)
+            cache_len_after = (
+                getattr(rt_state, "cache_len_after_last_compression", None)
+                if rt_state is not None
+                else None
+            )
+            nct_at_compression = (
+                getattr(rt_state, "nct_at_last_compression", None)
+                if rt_state is not None
+                else None
+            )
+            scheduler_nct = scheduler_nct_by_req_id.get(req_id)
+            if (
+                isinstance(cache_len_after, int)
+                and isinstance(nct_at_compression, int)
+                and isinstance(scheduler_nct, int)
+                and scheduler_nct >= nct_at_compression
+            ):
+                effective_before_step = cache_len_after + (
+                    scheduler_nct - nct_at_compression
+                )
+                return _ceil_div_positive(
+                    effective_before_step + scheduled_tokens,
+                    block_size,
+                )
+            if retained_cache_len is not None:
+                return _ceil_div_positive(
+                    retained_cache_len + scheduled_tokens,
+                    block_size,
+                )
+            return None
+
+        def _group_limits_for_event(
+            req_id: Any,
+            req_index: int,
+            retained_cache_len: int | None,
+        ) -> list[int | None]:
             limits: list[int | None] = []
             for table in tables:
                 current = _table_row_block_count(table, req_index)
@@ -968,8 +1023,14 @@ class TriAttentionModelRunner:
                     continue
                 limit: int | None = None
                 block_size = _table_block_size(table, fallback_block_size)
-                if retained_cache_len is not None and block_size is not None:
-                    required = _ceil_div_positive(retained_cache_len, block_size)
+                required: int | None = None
+                if block_size is not None:
+                    required = _required_blocks_after_step(
+                        req_id=req_id,
+                        retained_cache_len=retained_cache_len,
+                        block_size=block_size,
+                    )
+                if required is not None:
                     limit = max(0, required - current)
                 max_blocks = _table_max_blocks(table, block_table_obj)
                 if max_blocks is not None:
@@ -1045,7 +1106,7 @@ class TriAttentionModelRunner:
 
             event = events_by_req_id.get(req_id)
             retained_cache_len = _event_retained_cache_len(event)
-            group_limits = _group_limits_for_event(req_index, retained_cache_len)
+            group_limits = _group_limits_for_event(req_id, req_index, retained_cache_len)
             if not any(limit is not None for limit in group_limits):
                 continue
 
@@ -1058,9 +1119,10 @@ class TriAttentionModelRunner:
                 if self.config.log_decisions:
                     self._logger.debug(
                         "TriAttention patched new_block_ids: req=%s "
-                        "retained_cache_len=%s group_limits=%s "
+                        "retained_cache_len=%s scheduled=%s group_limits=%s "
                         "new_trimmed=%d->%d",
-                        req_id, retained_cache_len, group_limits,
+                        req_id, retained_cache_len,
+                        scheduled_tokens_by_req_id.get(req_id, 0), group_limits,
                         before_max, after_max,
                     )
 
