@@ -220,3 +220,31 @@ def test_effective_overrides_keep_full_budget_after_decode_compression():
     assert overrides.seq_base_map == {0: 4352}
     assert overrides.pos_delta_map == {0: -28287}
     assert overrides.single_seq_base == 4352
+
+
+def test_execute_model_none_keeps_events_for_sample_tokens_output():
+    event = {
+        "status": "applied",
+        "req_id": "req-1",
+        "cache_len_after": 4096,
+    }
+    scheduler_output = SimpleNamespace()
+
+    output, pending = bridge.attach_execute_model_compression_events(
+        output=None,
+        pending_events=[event],
+        scheduler_output=scheduler_output,
+    )
+
+    assert output is None
+    assert pending == [event]
+    assert scheduler_output.triattention_compression_events == [event]
+
+    sample_output = SimpleNamespace()
+    sample_output, pending = bridge.attach_sample_tokens_compression_events(
+        output=sample_output,
+        pending_events=pending,
+    )
+
+    assert sample_output.triattention_compression_events == [event]
+    assert pending == []

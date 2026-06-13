@@ -243,9 +243,9 @@ def attach_execute_model_compression_events(
 
     In vLLM V1's async path, ``execute_model`` returns ``None`` (the actual
     ``ModelRunnerOutput`` is produced later).  When that happens, attach
-    events to ``scheduler_output`` instead — the same Python object is
-    passed through to ``scheduler.update_from_output()``, so the events
-    will arrive without serialization.
+    events to ``scheduler_output`` as a same-process fallback, but keep them
+    pending so the later ``sample_tokens`` output can carry them across
+    executor process boundaries.
 
     Returns ``(output, remaining_pending_events)``.
     """
@@ -262,10 +262,10 @@ def attach_execute_model_compression_events(
                     "attach_events: output=None, attached %d events (%d applied) to scheduler_output (id=%d)",
                     len(pending_events), applied_count, id(scheduler_output),
                 )
-            return output, []
+            return output, pending_events
         if pending_events:
             logger.warning(
-                "attach_events: output=None scheduler_output=None, DROPPING %d events (%d applied)",
+                "attach_events: output=None scheduler_output=None, keeping %d events (%d applied) for sample_tokens",
                 len(pending_events), applied_count,
             )
         return output, pending_events
