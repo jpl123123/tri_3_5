@@ -543,6 +543,17 @@ class TriAttentionModelRunner:
             return None
         return int(num_blocks_per_row[req_index]) * blk_size
 
+    def _is_worker_block_table_capacity_boundary(
+        self,
+        req_id: str,
+        effective_kv: int,
+        scheduled_tokens: int,
+    ) -> bool:
+        actual_kv = self._get_actual_kv_from_block_table(req_id)
+        if actual_kv is None or actual_kv <= 0:
+            return False
+        return int(effective_kv) + max(1, int(scheduled_tokens)) > int(actual_kv)
+
     def _compression_threshold(
         self,
         prefill_len: int,
@@ -778,6 +789,14 @@ class TriAttentionModelRunner:
                 effective_kv = actual_kv
             else:
                 effective_kv = actual_kv + scheduled_tokens_i
+            physical_capacity_boundary_hit = (
+                state.compression_count > 0
+                and self._is_worker_block_table_capacity_boundary(
+                    req_id,
+                    effective_kv,
+                    scheduled_tokens_i,
+                )
+            )
             if should_guard_fast_recency_long_context(
                 config=self.config,
                 effective_tokens=effective_kv,
@@ -825,7 +844,7 @@ class TriAttentionModelRunner:
                     threshold=threshold,
                 )
                 continue
-            if effective_kv < threshold:
+            if effective_kv < threshold and not physical_capacity_boundary_hit:
                 if existing is not None and existing.should_compress:
                     signals.pop(req_id, None)
                     if hasattr(self.state_store, "mark_compression_skipped"):
@@ -852,6 +871,19 @@ class TriAttentionModelRunner:
                         scheduled=scheduled_tokens_i,
                         scheduler_had_signal=True,
                         threshold=threshold,
+                    )
+                continue
+            if (
+                physical_capacity_boundary_hit
+                and existing is not None
+                and existing.should_compress
+            ):
+                if self.config.log_decisions:
+                    self._logger.debug(
+                        "TriAttention keeps scheduler trigger at worker block "
+                        "boundary: req=%s effective_kv=%d threshold=%d "
+                        "scheduled=%d",
+                        req_id, effective_kv, threshold, scheduled_tokens_i,
                     )
                 continue
             if (

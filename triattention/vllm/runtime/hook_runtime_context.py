@@ -166,6 +166,12 @@ def build_hook_runtime_context(
         physical_upper = block_capacity_hint + block_size_hint
         if effective_tokens > physical_upper:
             effective_tokens = physical_upper
+    physical_capacity_boundary_hit = (
+        isinstance(block_capacity_hint, int)
+        and block_size_hint > 0
+        and not _post_forward
+        and (effective_tokens + max(1, scheduled_tokens)) > block_capacity_hint
+    )
 
     recent_unabsorbed_tokens: int | None = None
     if req_runtime_state is not None:
@@ -269,14 +275,17 @@ def build_hook_runtime_context(
     length_gate_hit = estimated_effective_tokens >= local_length_threshold
     kv_override = str(getattr(signal, "reason", "")) == "kv_usage_threshold"
     should_defer_recompress = (
-        defer_for_prefill
-        or prefill_limit_hit
-        or initial_decode_grace_hit
-        or (
-            config.enable_experimental_kv_compaction
-            and req_id in compressed_once
-            and not kv_override
-            and not length_gate_hit
+        not physical_capacity_boundary_hit
+        and (
+            defer_for_prefill
+            or prefill_limit_hit
+            or initial_decode_grace_hit
+            or (
+                config.enable_experimental_kv_compaction
+                and req_id in compressed_once
+                and not kv_override
+                and not length_gate_hit
+            )
         )
     )
     defer_reason = None

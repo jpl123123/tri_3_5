@@ -146,6 +146,57 @@ def test_runner_keeps_existing_signal_on_first_decode_core_entry():
     assert logger.lines == []
 
 
+def test_runner_keeps_existing_signal_at_worker_block_boundary():
+    logger = _Logger()
+    base_runner = _AscendRunner()
+    base_runner.cache_config = types.SimpleNamespace(block_size=128)
+    base_runner.requests = {
+        "req-1": types.SimpleNamespace(num_computed_tokens=32639),
+    }
+    state_store = _StateStore()
+    state_store.state = types.SimpleNamespace(
+        prefill_len=32383,
+        compression_count=1,
+        current_cache_len=4353,
+    )
+    runner = object.__new__(TriAttentionModelRunner)
+    runner.config = TriAttentionRuntimeConfig(
+        kv_budget=4096,
+        divide_length=128,
+        min_reclaim_blocks_on_ascend=8,
+        defer_prefill_compression_on_ascend=False,
+        log_decisions=False,
+    )
+    runner._base_runner = base_runner
+    runner.state_store = state_store
+    runner._last_step = 273
+    runner._logger = logger
+    runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
+    runner._logged_execution_path_trigger_guards = set()
+    runner._get_actual_kv_from_block_table = lambda req_id: 34 * 128
+
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=32641,
+        step=273,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=32383,
+        scheduled_tokens=1,
+    )
+
+    signals = runner._supplement_worker_self_triggers(
+        types.SimpleNamespace(num_scheduled_tokens={"req-1": 1}),
+        {"req-1": signal},
+    )
+
+    assert signals == {"req-1": signal}
+    assert state_store.skipped is None
+
+
 class _PatchTable:
     def __init__(self, *, block_size=128, current_blocks=3, max_blocks=8):
         self.block_size = block_size
