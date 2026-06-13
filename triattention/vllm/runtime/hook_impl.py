@@ -147,7 +147,7 @@ def make_runner_compression_hook(
         retained_token_padding = (
             0
             if bool(getattr(signal, "_post_forward", False))
-            else int(runtime_ctx.scheduled_tokens)
+            else int(runtime_ctx.scheduled_tokens) + int(block_size_hint)
         )
         if log_execution_path and not log_execution_path_core_only:
             _runtime_logger.info(
@@ -225,6 +225,7 @@ def make_runner_compression_hook(
             effective_tokens=effective_tokens,
             budget_total=budget_total,
             block_size=block_size,
+            retained_token_padding=retained_token_padding,
         )
         if zero_copy_outcome is not None:
             if log_execution_path:

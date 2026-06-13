@@ -31,6 +31,7 @@ def test_zero_copy_tail_remap_preserves_decode_trailing_block():
         effective_tokens=10000,
         budget_total=2048,
         block_size=128,
+        retained_token_padding=129,
     )
 
     assert outcome is not None
@@ -68,3 +69,18 @@ def test_truncate_tail_reclaim_preserves_current_decode_write_block():
     assert group is not None
     assert group.block_ids_after == [10, 11, 12]
     assert group.block_ids_removed == [13]
+
+
+def test_truncate_tail_reclaim_preserves_next_decode_slack_block():
+    kept, removed, group = truncate_tail_reclaim_group(
+        gid=0,
+        normalized_block_ids=list(range(40)),
+        cache_len_after=4096,
+        block_size=128,
+        retained_token_padding=129,
+    )
+
+    assert kept == list(range(34))
+    assert removed == list(range(34, 40))
+    assert group is not None
+    assert group.block_ids_after == list(range(34))

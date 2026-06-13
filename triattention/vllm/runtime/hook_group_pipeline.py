@@ -81,6 +81,7 @@ def try_build_recency_tail_block_remap(
     effective_tokens: int,
     budget_total: int,
     block_size: int,
+    retained_token_padding: int = 0,
 ) -> GroupPipelineOutcome | None:
     """Zero-copy fast path for recency-only, block-aligned tail retention.
 
@@ -134,12 +135,21 @@ def try_build_recency_tail_block_remap(
         # token is written into KV. Preserve those trailing blocks while still
         # remapping the already-computed KV tail, otherwise the first decode
         # compression opportunity degenerates into zero_copy_recency_not_ready.
-        trailing_block_ids = list(normalized_block_ids[before_required:])
-        kept_block_ids = kept_tail_block_ids + trailing_block_ids
-        removed_block_ids = list(normalized_block_ids[:start_block])
         group_cache_len_after = group_total_tokens - start_block * block_size
         if group_cache_len_after <= 0 or group_cache_len_after > budget_total:
             return None
+        retained_tokens = int(group_cache_len_after) + max(
+            0,
+            int(retained_token_padding),
+        )
+        retained_blocks = num_required_blocks(retained_tokens, block_size)
+        trailing_block_ids = list(
+            normalized_block_ids[
+                before_required:min(len(normalized_block_ids), start_block + retained_blocks)
+            ]
+        )
+        kept_block_ids = kept_tail_block_ids + trailing_block_ids
+        removed_block_ids = list(normalized_block_ids[:start_block])
         if cache_len_after is None:
             cache_len_after = int(group_cache_len_after)
         elif cache_len_after != int(group_cache_len_after):
