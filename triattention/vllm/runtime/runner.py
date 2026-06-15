@@ -547,13 +547,36 @@ class TriAttentionModelRunner:
     def _is_worker_block_table_capacity_boundary(
         self,
         req_id: str,
-        effective_kv: int,
+        effective_kv_after_step: int,
         scheduled_tokens: int,
     ) -> bool:
         actual_kv = self._get_actual_kv_from_block_table(req_id)
         if actual_kv is None or actual_kv <= 0:
             return False
-        return int(effective_kv) + max(1, int(scheduled_tokens)) > int(actual_kv)
+        return int(effective_kv_after_step) >= int(actual_kv)
+
+    def _advance_compressed_cache_len_for_step(
+        self,
+        *,
+        req_id: str,
+        state: Any,
+        scheduled_tokens: int,
+    ) -> int:
+        """Advance runner-local effective len once for an already-compressed req."""
+        current_len = max(0, int(getattr(state, "current_cache_len", 0) or 0))
+        state_step = getattr(state, "current_cache_len_step", None)
+        if isinstance(state_step, int) and state_step == self._last_step:
+            return current_len
+
+        next_len = current_len + max(1, int(scheduled_tokens))
+        updater = getattr(self.state_store, "update_cache_len", None)
+        if callable(updater):
+            updater(req_id, next_len, step=self._last_step)
+        else:
+            setattr(state, "current_cache_len", next_len)
+            setattr(state, "current_cache_len_semantics", "estimated_with_scheduled")
+            setattr(state, "current_cache_len_step", self._last_step)
+        return next_len
 
     def _compression_threshold(
         self,
@@ -760,12 +783,17 @@ class TriAttentionModelRunner:
                 )
                 continue
             # Compute actual KV length on the Worker side.
-            # kv_from_blocks: block table already includes current step's
-            # allocated blocks (update_states runs before execute_model),
-            # so scheduled_tokens must NOT be added again.
+            # kv_includes_scheduled: the source already includes the current
+            # step's scheduled tokens, so scheduled_tokens must NOT be added.
             kv_from_blocks = False
+            kv_includes_scheduled = False
             if state.compression_count > 0 and state.current_cache_len > 0:
-                actual_kv = state.current_cache_len
+                actual_kv = self._advance_compressed_cache_len_for_step(
+                    req_id=req_id,
+                    state=state,
+                    scheduled_tokens=scheduled_tokens_i,
+                )
+                kv_includes_scheduled = True
             else:
                 # First-time compression: use block table for ground truth.
                 # num_computed_tokens from base_runner.requests has async lag
@@ -775,6 +803,7 @@ class TriAttentionModelRunner:
                 if actual_kv_bt is not None:
                     actual_kv = actual_kv_bt
                     kv_from_blocks = True
+                    kv_includes_scheduled = True
                 else:
                     # Fallback: base_runner.requests (may be stale).
                     if req_state is not None:
@@ -785,8 +814,7 @@ class TriAttentionModelRunner:
                 prefill_len,
                 is_prefill_step=is_prefill_step_for_threshold,
             )
-            if kv_from_blocks:
-                # Block table capacity already covers scheduled tokens.
+            if kv_includes_scheduled:
                 effective_kv = actual_kv
             else:
                 effective_kv = actual_kv + scheduled_tokens_i

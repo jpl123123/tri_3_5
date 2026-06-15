@@ -170,7 +170,8 @@ def build_hook_runtime_context(
         isinstance(block_capacity_hint, int)
         and block_size_hint > 0
         and not _post_forward
-        and (effective_tokens + max(1, scheduled_tokens)) > block_capacity_hint
+        and bool(getattr(signal, "force", False))
+        and (effective_tokens + max(1, scheduled_tokens)) >= block_capacity_hint
     )
 
     recent_unabsorbed_tokens: int | None = None

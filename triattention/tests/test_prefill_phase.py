@@ -208,6 +208,7 @@ def test_decode_recompress_not_deferred_at_physical_capacity_boundary():
         protect_prefill=False,
         prefill_len=32383,
         scheduled_tokens=1,
+        force=True,
     )
 
     context = build_hook_runtime_context(

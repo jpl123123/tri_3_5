@@ -92,11 +92,27 @@ class _StateStore:
             prefill_len=9863,
             compression_count=0,
             current_cache_len=0,
+            current_cache_len_step=-1,
+            current_cache_len_semantics="unknown",
         )
         self.skipped = None
 
     def get(self, req_id):
         return self.state
+
+    def ensure(self, *, req_id, prefill_len, protect_prefill):
+        self.state.prefill_len = max(
+            int(getattr(self.state, "prefill_len", 0) or 0),
+            int(prefill_len),
+        )
+        self.state.protect_prefill = bool(protect_prefill)
+        return self.state
+
+    def update_cache_len(self, req_id, cache_len, step=None):
+        self.state.current_cache_len = max(0, int(cache_len))
+        self.state.current_cache_len_semantics = "estimated_with_scheduled"
+        if isinstance(step, int):
+            self.state.current_cache_len_step = step
 
     def mark_compression_skipped(self, **kwargs):
         self.skipped = kwargs
@@ -196,6 +212,91 @@ def test_runner_keeps_existing_signal_at_worker_block_boundary():
     assert signals["req-1"].req_id == signal.req_id
     assert signals["req-1"].force is True
     assert state_store.skipped is None
+
+
+def test_runner_advances_compressed_decode_to_exact_block_boundary():
+    logger = _Logger()
+    base_runner = _AscendRunner()
+    base_runner.cache_config = types.SimpleNamespace(block_size=128)
+    base_runner.requests = {
+        "req-1": types.SimpleNamespace(num_computed_tokens=32768),
+    }
+    state_store = _StateStore()
+    state_store.state = types.SimpleNamespace(
+        prefill_len=32768,
+        compression_count=1,
+        current_cache_len=8447,
+        current_cache_len_step=300,
+        current_cache_len_semantics="estimated_with_scheduled",
+    )
+    runner = object.__new__(TriAttentionModelRunner)
+    runner.config = TriAttentionRuntimeConfig(
+        kv_budget=8192,
+        divide_length=128,
+        min_reclaim_blocks_on_ascend=8,
+        defer_prefill_compression_on_ascend=False,
+        log_decisions=False,
+    )
+    runner._base_runner = base_runner
+    runner.state_store = state_store
+    runner._last_step = 301
+    runner._logger = logger
+    runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
+    runner._logged_execution_path_trigger_guards = set()
+    runner._get_actual_kv_from_block_table = lambda req_id: 66 * 128
+
+    signals = runner._supplement_worker_self_triggers(
+        types.SimpleNamespace(num_scheduled_tokens={"req-1": 1}),
+        {},
+    )
+
+    assert state_store.state.current_cache_len == 8448
+    assert state_store.state.current_cache_len_step == 301
+    assert signals["req-1"].estimated_cache_len == 8448
+    assert signals["req-1"].force is True
+
+
+def test_runner_does_not_double_advance_compressed_len_in_same_step():
+    logger = _Logger()
+    base_runner = _AscendRunner()
+    base_runner.cache_config = types.SimpleNamespace(block_size=128)
+    base_runner.requests = {
+        "req-1": types.SimpleNamespace(num_computed_tokens=32768),
+    }
+    state_store = _StateStore()
+    state_store.state = types.SimpleNamespace(
+        prefill_len=32768,
+        compression_count=1,
+        current_cache_len=8448,
+        current_cache_len_step=301,
+        current_cache_len_semantics="estimated_with_scheduled",
+    )
+    runner = object.__new__(TriAttentionModelRunner)
+    runner.config = TriAttentionRuntimeConfig(
+        kv_budget=8192,
+        divide_length=128,
+        min_reclaim_blocks_on_ascend=8,
+        defer_prefill_compression_on_ascend=False,
+        log_decisions=False,
+    )
+    runner._base_runner = base_runner
+    runner.state_store = state_store
+    runner._last_step = 301
+    runner._logger = logger
+    runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
+    runner._logged_execution_path_trigger_guards = set()
+    runner._get_actual_kv_from_block_table = lambda req_id: 66 * 128
+
+    signals = runner._supplement_worker_self_triggers(
+        types.SimpleNamespace(num_scheduled_tokens={"req-1": 1}),
+        {},
+    )
+
+    assert state_store.state.current_cache_len == 8448
+    assert signals["req-1"].estimated_cache_len == 8448
+    assert signals["req-1"].force is True
 
 
 class _PatchTable:
