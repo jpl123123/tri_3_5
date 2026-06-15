@@ -17,6 +17,9 @@ def _limited_signal_items(
     for req_id, signal in signals.items():
         if not signal.should_compress:
             continue
+        if bool(getattr(signal, "force", False)):
+            compressing.append((req_id, signal))
+            continue
         if max_compressions_per_step > 0 and remaining <= 0:
             delayed.append(req_id)
             continue
@@ -94,7 +97,13 @@ def execute_runner_compression_actions(
             last_step = getattr(req_state, "last_compression_step", -1)
             compression_count = int(getattr(req_state, "compression_count", 0) or 0)
             sched_tokens = int(getattr(signal, "scheduled_tokens", 1))
-            if compression_count > 0 and last_step >= 0 and signal.step - last_step <= 1 and sched_tokens <= 1:
+            if (
+                compression_count > 0
+                and last_step >= 0
+                and signal.step - last_step <= 1
+                and sched_tokens <= 1
+                and not bool(getattr(signal, "force", False))
+            ):
                 if log_decisions:
                     logger.debug(
                         "TriAttention compression skipped (batch-queue dedup) "

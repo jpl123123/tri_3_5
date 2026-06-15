@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 import time
 from typing import Any
@@ -878,6 +879,7 @@ class TriAttentionModelRunner:
                 and existing is not None
                 and existing.should_compress
             ):
+                signals[req_id] = replace(existing, force=True)
                 if self.config.log_decisions:
                     self._logger.debug(
                         "TriAttention keeps scheduler trigger at worker block "
@@ -910,6 +912,7 @@ class TriAttentionModelRunner:
                 protect_prefill=self.config.protect_prefill,
                 prefill_len=prefill_len,
                 scheduled_tokens=scheduled_tokens_i,
+                force=physical_capacity_boundary_hit,
             )
         return signals
 

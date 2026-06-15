@@ -248,6 +248,8 @@ def make_runner_compression_hook(
                 effective_tokens=effective_tokens,
                 budget_total=budget_total,
                 recent_unabsorbed_tokens=recent_unabsorbed_tokens,
+                retained_cache_len=int(zero_copy_outcome.cache_len_after)
+                + max(0, int(retained_token_padding)),
             )
         if (
             uses_pure_fast_recency(config)

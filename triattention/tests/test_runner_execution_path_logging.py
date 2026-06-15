@@ -193,7 +193,8 @@ def test_runner_keeps_existing_signal_at_worker_block_boundary():
         {"req-1": signal},
     )
 
-    assert signals == {"req-1": signal}
+    assert signals["req-1"].req_id == signal.req_id
+    assert signals["req-1"].force is True
     assert state_store.skipped is None
 
 

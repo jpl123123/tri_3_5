@@ -258,6 +258,75 @@ def test_max_compressions_per_step_delays_excess_requests():
     assert state_store.skipped_by_req["req-3"]["reason"] == "compression_step_limited"
 
 
+def test_max_compressions_per_step_does_not_delay_forced_boundary_requests():
+    state_store = _StateStore()
+    executor = _Executor(reason="under_budget")
+    signals = {}
+    for idx in range(4):
+        req_id = f"req-{idx}"
+        signals[req_id] = CompressionSignal(
+            req_id=req_id,
+            should_compress=True,
+            reason="length_threshold",
+            estimated_cache_len=6401,
+            step=9,
+            kv_usage=None,
+            protect_prefill=False,
+            prefill_len=10000,
+            scheduled_tokens=1,
+            force=True,
+        )
+
+    events = execute_runner_compression_actions(
+        executor=executor,
+        state_store=state_store,
+        scheduler_output=object(),
+        signals=signals,
+        strict_no_downgrade=False,
+        allowed_strict_skip_reasons=set(),
+        logger=_Logger(),
+        log_decisions=False,
+        max_compressions_per_step=2,
+    )
+
+    assert executor.calls == ["req-0", "req-1", "req-2", "req-3"]
+    assert "compression_step_limited" not in [event["reason"] for event in events]
+
+
+def test_forced_boundary_request_bypasses_batch_queue_dedup():
+    state_store = RequestStateStore()
+    state_store.ensure("req-1", prefill_len=10000, protect_prefill=False)
+    state_store.mark_compressed("req-1", step=8, cache_len=6400, scheduled_tokens=1)
+    executor = _Executor(reason="under_budget")
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=6401,
+        step=9,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=10000,
+        scheduled_tokens=1,
+        force=True,
+    )
+
+    events = execute_runner_compression_actions(
+        executor=executor,
+        state_store=state_store,
+        scheduler_output=object(),
+        signals={"req-1": signal},
+        strict_no_downgrade=False,
+        allowed_strict_skip_reasons=set(),
+        logger=_Logger(),
+        log_decisions=False,
+        max_compressions_per_step=1,
+    )
+
+    assert executor.calls == ["req-1"]
+    assert events[0]["reason"] == "under_budget"
+
+
 def test_applied_compression_event_records_scheduler_nct_anchor():
     state_store = RequestStateStore()
     state_store.ensure("req-1", prefill_len=32383, protect_prefill=False)

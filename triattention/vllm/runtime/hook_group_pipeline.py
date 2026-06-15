@@ -149,7 +149,16 @@ def try_build_recency_tail_block_remap(
             ]
         )
         kept_block_ids = kept_tail_block_ids + trailing_block_ids
-        removed_block_ids = list(normalized_block_ids[:start_block])
+        if len(kept_block_ids) < retained_blocks:
+            missing_blocks = retained_blocks - len(kept_block_ids)
+            borrow_start = max(0, start_block - missing_blocks)
+            borrowed_slack_block_ids = list(normalized_block_ids[borrow_start:start_block])
+            kept_block_ids += borrowed_slack_block_ids
+        kept_block_id_set = set(kept_block_ids)
+        removed_block_ids = [
+            block_id for block_id in normalized_block_ids
+            if block_id not in kept_block_id_set
+        ]
         if cache_len_after is None:
             cache_len_after = int(group_cache_len_after)
         elif cache_len_after != int(group_cache_len_after):

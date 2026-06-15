@@ -24,3 +24,6 @@ class CompressionSignal:
     # Number of tokens scheduled for this request in the current scheduler step.
     # For chunked prefill this can be >1.
     scheduled_tokens: int = 1
+    # Worker-local hard boundary triggers cannot be delayed without risking a
+    # slot write past the current block-table capacity.
+    force: bool = False

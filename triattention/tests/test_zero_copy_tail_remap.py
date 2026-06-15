@@ -55,6 +55,22 @@ def test_zero_copy_tail_remap_still_handles_exact_block_table():
     assert outcome.block_reclaim_groups[0].block_ids_removed == list(range(63))
 
 
+def test_zero_copy_tail_remap_borrows_slack_blocks_on_aligned_tail():
+    outcome = try_build_recency_tail_block_remap(
+        config=_config(),
+        mutable_block_ids_by_group=[list(range(100))],
+        effective_tokens=12800,
+        budget_total=6400,
+        block_size=128,
+        retained_token_padding=129,
+    )
+
+    assert outcome is not None
+    assert outcome.cache_len_after == 6400
+    assert outcome.mutable_block_ids_by_group == [list(range(50, 100)) + [48, 49]]
+    assert outcome.block_reclaim_groups[0].block_ids_removed == list(range(48))
+
+
 def test_truncate_tail_reclaim_preserves_current_decode_write_block():
     kept, removed, group = truncate_tail_reclaim_group(
         gid=0,
