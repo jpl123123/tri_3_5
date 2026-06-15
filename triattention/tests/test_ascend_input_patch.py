@@ -218,16 +218,17 @@ def test_v1_prepare_inputs_fails_on_stale_expected_batch_row():
         )
 
 
-def test_v1_prepare_inputs_fails_when_effective_seq_exceeds_block_table_capacity():
+def test_v1_prepare_inputs_clamps_effective_seq_to_block_table_capacity():
     def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
         del self, scheduler_output, num_scheduled_tokens
         return object()
 
+    block_table = _V1BlockTable(block_size=128, num_blocks_per_row=(3,))
     runner = SimpleNamespace(
         input_batch=SimpleNamespace(
             num_reqs=1,
             num_computed_tokens_cpu=np.array([4096], dtype=np.int32),
-            block_table=_V1BlockTable(block_size=128, num_blocks_per_row=(3,)),
+            block_table=block_table,
         ),
         arange_np=np.array([0], dtype=np.int32),
         positions=SimpleNamespace(np=np.array([4096], dtype=np.int32)),
@@ -247,20 +248,17 @@ def test_v1_prepare_inputs_fails_when_effective_seq_exceeds_block_table_capacity
 
     try:
         patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
-        try:
-            patched(runner, scheduler_output, np.array([1], dtype=np.int32))
-        except RuntimeError as exc:
-            assert "TRIATTN_ASCEND_V1_SLOT_POSITION_OOB" in str(exc)
-            assert "max_slot_position=384" in str(exc)
-            assert "capacity=384" in str(exc)
-        else:
-            raise AssertionError("block table capacity mismatch should fail fast")
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
     finally:
         input_patch_state.set_active_effective_overrides_enabled(False)
         input_patch_state.set_active_effective_sparse_overrides(
             effective_base_by_req_idx=None,
             effective_pos_delta_by_req_idx=None,
         )
+
+    assert runner.seq_lens.np[0] == 384
+    assert block_table.commit_calls == [1]
+    np.testing.assert_array_equal(block_table.compute_calls[0][1], [383])
 
 
 def test_v1_prepare_inputs_fails_when_shifted_slot_position_is_out_of_bounds():

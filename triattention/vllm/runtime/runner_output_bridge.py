@@ -27,6 +27,24 @@ from .runner_struct_compat import debug_v1_override_path_enabled
 from .thresholds import is_ascend_environment_available, is_ascend_runtime
 
 
+class _TriattentionEventBag:
+    """Picklable carrier for TriAttention compression events."""
+
+    __slots__ = ("events",)
+
+    def __init__(self, events):
+        self.events = list(events)
+
+    def __reduce__(self):
+        return (_TriattentionEventBag, (list(self.events),))
+
+    def __getstate__(self):
+        return {"events": list(self.events)}
+
+    def __setstate__(self, state):
+        self.events = list(state.get("events", []))
+
+
 def _scheduler_output_details(
     scheduler_output: Any,
     *,
@@ -241,8 +259,8 @@ def attach_execute_model_compression_events(
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Attach compression events to ModelRunnerOutput when possible.
 
-    In vLLM V1's async path, ``execute_model`` returns ``None`` (the actual
-    ``ModelRunnerOutput`` is produced later).  When that happens, attach
+    In vLLM V1's async path, ``execute_model`` returns ``None`` and the
+    actual ``ModelRunnerOutput`` is produced later.  When that happens, attach
     events to ``scheduler_output`` as a same-process fallback, but keep them
     pending so the later ``sample_tokens`` output can carry them across
     executor process boundaries.
@@ -263,12 +281,8 @@ def attach_execute_model_compression_events(
                     len(pending_events), applied_count, id(scheduler_output),
                 )
             return output, pending_events
-        if pending_events:
-            logger.warning(
-                "attach_events: output=None scheduler_output=None, keeping %d events (%d applied) for sample_tokens",
-                len(pending_events), applied_count,
-            )
         return output, pending_events
+    _attach_triattention_events_via_kv_cache_events(output, pending_events)
     try:
         setattr(output, "triattention_compression_events", pending_events)
         if applied_count > 0 and runtime_logging_enabled():
@@ -282,6 +296,49 @@ def attach_execute_model_compression_events(
     return output, []
 
 
+def _attach_triattention_events_via_kv_cache_events(
+    output: Any,
+    pending_events: list[dict[str, Any]],
+) -> bool:
+    """Attach events through the vLLM declared cross-process output field."""
+    if output is None or not pending_events:
+        return False
+    try:
+        target = output
+        if not hasattr(target, "kv_connector_output"):
+            for attr_name in ("model_runner_output", "_model_runner_output"):
+                candidate = getattr(target, attr_name, None)
+                if candidate is not None and hasattr(candidate, "kv_connector_output"):
+                    target = candidate
+                    break
+        kco = getattr(target, "kv_connector_output", None)
+        if kco is None:
+            from vllm.v1.outputs import KVConnectorOutput  # noqa: PLC0415
+
+            kco = KVConnectorOutput()
+            setattr(target, "kv_connector_output", kco)
+        kco.kv_cache_events = _TriattentionEventBag(pending_events)
+        return True
+    except Exception:
+        return False
+
+
+def _read_triattention_events_from_kv_cache_events(
+    model_runner_output: Any,
+) -> list[dict[str, Any]] | None:
+    """Read TriAttention events from the vLLM declared cross-process field."""
+    kco = getattr(model_runner_output, "kv_connector_output", None)
+    if kco is None:
+        return None
+    bag = getattr(kco, "kv_cache_events", None)
+    if bag is None:
+        return None
+    events = getattr(bag, "events", None)
+    if not isinstance(events, list):
+        return None
+    return events
+
+
 def attach_sample_tokens_compression_events(
     *,
     output: Any,
@@ -290,5 +347,6 @@ def attach_sample_tokens_compression_events(
     """Attach compression events to sample_tokens output (fallback path)."""
     if output is None:
         return None, []
+    _attach_triattention_events_via_kv_cache_events(output, pending_events)
     setattr(output, "triattention_compression_events", pending_events)
     return output, []

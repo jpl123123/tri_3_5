@@ -1,6 +1,7 @@
 import sys
 import types
 from types import SimpleNamespace
+import pickle
 
 
 class _Logger:
@@ -277,11 +278,25 @@ def test_execute_model_none_keeps_events_for_sample_tokens_output():
     assert pending == [event]
     assert scheduler_output.triattention_compression_events == [event]
 
-    sample_output = SimpleNamespace()
+    inner_output = SimpleNamespace(kv_connector_output=SimpleNamespace())
+    sample_output = SimpleNamespace(_model_runner_output=inner_output)
     sample_output, pending = bridge.attach_sample_tokens_compression_events(
         output=sample_output,
         pending_events=pending,
     )
 
     assert sample_output.triattention_compression_events == [event]
+    assert bridge._read_triattention_events_from_kv_cache_events(inner_output) == [event]
     assert pending == []
+
+
+def test_triattention_event_bag_survives_pickle_round_trip():
+    event = {
+        "status": "applied",
+        "req_id": "req-1",
+        "cache_len_after": 4096,
+    }
+
+    restored = pickle.loads(pickle.dumps(bridge._TriattentionEventBag([event])))
+
+    assert restored.events == [event]

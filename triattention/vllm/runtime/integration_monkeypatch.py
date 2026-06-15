@@ -25,6 +25,7 @@ from .input_patch_backend import install_runtime_input_patch
 from .logging_control import runtime_logging_enabled
 from .planner import CompressionPlanner
 from .request_key_compat import iter_scheduled_token_items
+from .runner_output_bridge import _read_triattention_events_from_kv_cache_events
 from .scheduler import TriAttentionScheduler
 from .signals import CompressionSignal
 from .thresholds import is_ascend_environment_available
@@ -206,14 +207,19 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
     if cfg is None:
         return outputs
 
-    # Prefer events from model_runner_output (V0 / sync path), fall back to
-    # scheduler_output (V1 async path where execute_model returns None).
-    compression_events = getattr(
+    # Prefer the declared vLLM output field because it survives worker ->
+    # engine_core pickling. Dynamic attrs are kept as in-process fallbacks.
+    compression_events = _read_triattention_events_from_kv_cache_events(
         model_runner_output,
-        "triattention_compression_events",
-        None,
     )
-    source = "model_runner_output" if compression_events else None
+    source = "kv_connector_output.kv_cache_events" if compression_events else None
+    if not compression_events:
+        compression_events = getattr(
+            model_runner_output,
+            "triattention_compression_events",
+            None,
+        )
+        source = "model_runner_output" if compression_events else None
     if not compression_events:
         compression_events = getattr(
             scheduler_output,

@@ -333,6 +333,48 @@ def _validate_v1_block_table_bounds(
                 )
 
 
+def _effective_block_table_capacity(input_batch: Any | None, row: int) -> int | None:
+    """Return current worker block-table capacity in tokens for ``row``."""
+    if input_batch is None:
+        return None
+    block_table_obj = getattr(input_batch, "block_table", None)
+    if block_table_obj is None:
+        return None
+    capacities: list[int] = []
+    for table in _block_table_inner_tables(block_table_obj):
+        block_size = _table_block_size(table)
+        if block_size is None:
+            cache_config = getattr(input_batch, "cache_config", None)
+            try:
+                block_size = int(getattr(cache_config, "block_size"))
+            except Exception:
+                block_size = None
+        row_blocks = _table_row_block_count(table, int(row))
+        if block_size is None or row_blocks is None:
+            continue
+        capacities.append(max(0, int(block_size) * int(row_blocks)))
+    if capacities:
+        return min(capacities)
+    return None
+
+
+def _clamp_effective_base_to_capacity(
+    *,
+    input_batch: Any | None,
+    row: int,
+    effective_base: int,
+    num_scheduled: int,
+) -> int:
+    """Clamp effective base so rebuilt slot positions fit local capacity."""
+    if num_scheduled <= 0:
+        return int(effective_base)
+    capacity = _effective_block_table_capacity(input_batch, int(row))
+    if capacity is None or capacity <= 0:
+        return int(effective_base)
+    max_effective_base = max(0, int(capacity) - int(num_scheduled))
+    return min(int(effective_base), max_effective_base)
+
+
 def _build_effective_slot_positions(
     *,
     positions_np: np.ndarray,
@@ -354,6 +396,12 @@ def _build_effective_slot_positions(
         base = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE)
         if base >= int(positions_np[0]):
             return None
+        base = _clamp_effective_base_to_capacity(
+            input_batch=input_batch,
+            row=0,
+            effective_base=base,
+            num_scheduled=int(positions_np.size),
+        )
         return base + np.arange(int(positions_np.size), dtype=positions_np.dtype)
 
     sparse_bases = _remap_by_expected_req_ids(
@@ -372,7 +420,13 @@ def _build_effective_slot_positions(
                 continue
             if int(effective_base) >= int(positions_np[token_indices[0]]):
                 continue
-            out[token_indices] = int(effective_base) + np.arange(
+            clamped_base = _clamp_effective_base_to_capacity(
+                input_batch=input_batch,
+                row=row,
+                effective_base=int(effective_base),
+                num_scheduled=int(token_indices.size),
+            )
+            out[token_indices] = clamped_base + np.arange(
                 int(token_indices.size),
                 dtype=positions_np.dtype,
             )
@@ -432,7 +486,11 @@ def _apply_sparse_seq_len_overrides_in_place(
         base = int(_patch_state.ACTIVE_SINGLE_EFFECTIVE_SEQ_BASE)
         if base >= int(num_computed_tokens_cpu[0]):
             return False
-        seq_lens_np[0] = base + int(num_scheduled_tokens[0])
+        new_seq_len = base + int(num_scheduled_tokens[0])
+        capacity = _effective_block_table_capacity(input_batch, 0)
+        if capacity is not None and capacity > 0 and new_seq_len > capacity:
+            new_seq_len = int(capacity)
+        seq_lens_np[0] = new_seq_len
         return True
 
     sparse_bases = _remap_by_expected_req_ids(
@@ -446,7 +504,11 @@ def _apply_sparse_seq_len_overrides_in_place(
     for req_idx, effective_base in sparse_bases.items():
         idx = int(req_idx)
         if 0 <= idx < num_reqs and int(effective_base) < int(num_computed_tokens_cpu[idx]):
-            seq_lens_np[idx] = int(effective_base) + int(num_scheduled_tokens[idx])
+            new_seq_len = int(effective_base) + int(num_scheduled_tokens[idx])
+            capacity = _effective_block_table_capacity(input_batch, idx)
+            if capacity is not None and capacity > 0 and new_seq_len > capacity:
+                new_seq_len = int(capacity)
+            seq_lens_np[idx] = new_seq_len
             applied = True
     return applied
 
