@@ -14,51 +14,21 @@
 
 ## 2. 当前执行流程图
 
-下面流程图描述当前 vLLM-Ascend 版本中一次长上下文请求从进入服务、触发 TriAttention、完成 KV 选择和驱逐，到继续 decode 的主路径。
+下面流程图按大的核心步骤描述当前 vLLM-Ascend 版本中 TriAttention 的执行闭环。
 
 ```mermaid
 flowchart TD
-    A["OpenAI/vLLM 请求进入服务"] --> B["vLLM Scheduler 调度请求<br/>维护逻辑上下文长度和 block table"]
-    B --> C["NPUWorker / NPUModelRunner<br/>安装 TriAttention runner proxy"]
-    C --> D["Prefill 阶段"]
-    D --> E{"是否允许 prefill 压缩?"}
-    E -- "默认 Ascend 延迟" --> F["等待完整 prompt prefill 完成"]
-    E -- "显式允许" --> G["检查 KV_BUDGET / reclaim 阈值"]
-    F --> H["Decode 阶段"]
-    G --> H
-    H --> I["runner compression boundary<br/>检查当前有效 KV 长度"]
-    I --> J{"是否达到压缩条件?"}
-    J -- "否" --> K["按普通 vLLM-Ascend 路径继续 forward"]
-    K --> H
-    J -- "是" --> L["进入 worker hook<br/>构建 RequestState / KV group / runtime config"]
-
-    L --> M{"选择策略"}
-    M -- "sparse stats 可用" --> N["TriAttention sparse scoring"]
-    M -- "仅诊断或无 stats" --> O["fast recency-only<br/>保留最近 KV_BUDGET token"]
-
-    N --> N1["读取预计算 Q/K 频域统计<br/>q_mean_complex / q_abs_mean / freq_scale"]
-    N1 --> N2["读取 paged KV cache 中的 K<br/>按 layer / KV head / position 分块"]
-    N2 --> N3["应用 RoPE 频率和位置差<br/>计算三角频域重要性分数"]
-    N3 --> N4["跨层/跨 head 聚合<br/>per-head 或 shared keep indices"]
-    O --> P["生成 keep indices"]
-    N4 --> P
-
-    P --> Q["KV compaction"]
-    Q --> Q1["将保留 token 的 K/V 搬移到连续前缀"]
-    Q1 --> Q2["支持 combined KV cache 和 Ascend split K/V cache"]
-    Q2 --> R["推导压缩后 effective cache len"]
-    R --> S["tail block reclaim<br/>释放不再需要的物理 KV blocks"]
-    S --> T["清理 block table tail<br/>同步 worker / engine 分配状态"]
-
-    T --> U["生成 compression events"]
-    U --> V["通过 kv_connector_output.kv_cache_events<br/>跨进程传回 engine_core"]
-    V --> W["Scheduler 读取 events<br/>更新 request effective KV offset"]
-    W --> X["下一轮 input preparation"]
-    X --> X1["重写 seq_lens / seq_lens_np"]
-    X1 --> X2["重建 slot mapping / effective base"]
-    X2 --> X3["block 边界 capacity clamp<br/>避免 slot / seq_len OOB"]
-    X3 --> Y["NPU attention 读取压缩后的有效 KV 视图"]
-    Y --> H
+    A["请求进入 vLLM-Ascend 服务"] --> B["TriAttention runtime 接管<br/>scheduler / worker / NPU runner patch"]
+    B --> C["长上下文 prefill / decode 推理<br/>持续维护逻辑上下文和 KV block 状态"]
+    C --> D{"达到压缩触发条件?"}
+    D -- "否" --> C
+    D -- "是" --> E["TriAttention 重要性选择<br/>基于 Q/K 频域统计、RoPE 位置差和 KV_BUDGET 打分选 token"]
+    E --> F["KV cache 压缩<br/>保留高分 KV，将 K/V 搬移到连续有效区域"]
+    F --> G["物理资源回收<br/>释放被驱逐 token 对应的 tail KV blocks"]
+    G --> H["运行时状态同步<br/>更新 scheduler/worker effective KV 视图"]
+    H --> I["Ascend 输入元数据修正<br/>重写 seq_lens、slot mapping、block table 视图"]
+    I --> J["NPU attention 使用压缩后的有效 KV 继续 decode"]
+    J --> C
 ```
 
 算法核心可以概括为四步：
