@@ -1,6 +1,5 @@
 # TriAttention vLLM-Ascend 版本开发总结
 
-> 用途：课题汇报材料。本文从最原始版本到当前 `tri_zxj_version0615` 分支，凝练总结 TriAttention 在 vLLM-Ascend 场景下完成的核心开发点及其作用。
 >
 > 当前版本基线：`tri_zxj_version0615`，最新提交 `a9c07ef Add TriAttention Ascend docs`。
 
@@ -242,9 +241,9 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 
 通过 execution path、core trace、selector debug、phase profile、E2E profile 等机制，可以明确判断压缩是否触发、走的是 sparse scoring 还是 recency、是否发生物理回收，以及具体耗时落在哪个阶段。
 
-## 6. 汇报建议表述
+## 6. 修改总结
 
-可以在课题汇报中按以下层次呈现：
+修改总结：
 
 1. 算法层：保留 TriAttention 基于频域统计的 KV 重要性选择思想，用 `KV_BUDGET` 控制保留 token 数。
 2. 系统层：将算法接入 vLLM-Ascend runtime，支持 NPUWorker、NPUModelRunner、scheduler/worker 协同。
