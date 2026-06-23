@@ -2,7 +2,7 @@
 
 > 用途：课题汇报材料。本文从最原始版本到当前 `tri_zxj_version0615` 分支，凝练总结 TriAttention 在 vLLM-Ascend 场景下完成的核心适配、工程开发点及其作用。
 >
-> 当前版本基线：`tri_zxj_version0615`，最新提交 `312a132 Port kv cache eviction fix to zxj branch`。
+> 当前版本基线：`tri_zxj_version0615`，最新提交 `a9c07ef Add TriAttention Ascend docs`。
 
 ## 1. 总体定位
 
@@ -12,7 +12,63 @@
 
 > 当前版本把原始 TriAttention 的“KV 重要性选择算法”扩展成了一个可在 vLLM-Ascend 长上下文服务中运行的完整 runtime：包含 NPU 接入、压缩触发、打分选择、KV 搬移、物理 block 回收、并发请求同步、输入元数据修正、性能观测和回归测试。
 
-## 2. 核心适配与开发点
+## 2. 当前执行流程图
+
+下面流程图描述当前 vLLM-Ascend 版本中一次长上下文请求从进入服务、触发 TriAttention、完成 KV 选择和驱逐，到继续 decode 的主路径。
+
+```mermaid
+flowchart TD
+    A["OpenAI/vLLM 请求进入服务"] --> B["vLLM Scheduler 调度请求<br/>维护逻辑上下文长度和 block table"]
+    B --> C["NPUWorker / NPUModelRunner<br/>安装 TriAttention runner proxy"]
+    C --> D["Prefill 阶段"]
+    D --> E{"是否允许 prefill 压缩?"}
+    E -- "默认 Ascend 延迟" --> F["等待完整 prompt prefill 完成"]
+    E -- "显式允许" --> G["检查 KV_BUDGET / reclaim 阈值"]
+    F --> H["Decode 阶段"]
+    G --> H
+    H --> I["runner compression boundary<br/>检查当前有效 KV 长度"]
+    I --> J{"是否达到压缩条件?"}
+    J -- "否" --> K["按普通 vLLM-Ascend 路径继续 forward"]
+    K --> H
+    J -- "是" --> L["进入 worker hook<br/>构建 RequestState / KV group / runtime config"]
+
+    L --> M{"选择策略"}
+    M -- "sparse stats 可用" --> N["TriAttention sparse scoring"]
+    M -- "仅诊断或无 stats" --> O["fast recency-only<br/>保留最近 KV_BUDGET token"]
+
+    N --> N1["读取预计算 Q/K 频域统计<br/>q_mean_complex / q_abs_mean / freq_scale"]
+    N1 --> N2["读取 paged KV cache 中的 K<br/>按 layer / KV head / position 分块"]
+    N2 --> N3["应用 RoPE 频率和位置差<br/>计算三角频域重要性分数"]
+    N3 --> N4["跨层/跨 head 聚合<br/>per-head 或 shared keep indices"]
+    O --> P["生成 keep indices"]
+    N4 --> P
+
+    P --> Q["KV compaction"]
+    Q --> Q1["将保留 token 的 K/V 搬移到连续前缀"]
+    Q1 --> Q2["支持 combined KV cache 和 Ascend split K/V cache"]
+    Q2 --> R["推导压缩后 effective cache len"]
+    R --> S["tail block reclaim<br/>释放不再需要的物理 KV blocks"]
+    S --> T["清理 block table tail<br/>同步 worker / engine 分配状态"]
+
+    T --> U["生成 compression events"]
+    U --> V["通过 kv_connector_output.kv_cache_events<br/>跨进程传回 engine_core"]
+    V --> W["Scheduler 读取 events<br/>更新 request effective KV offset"]
+    W --> X["下一轮 input preparation"]
+    X --> X1["重写 seq_lens / seq_lens_np"]
+    X1 --> X2["重建 slot mapping / effective base"]
+    X2 --> X3["block 边界 capacity clamp<br/>避免 slot / seq_len OOB"]
+    X3 --> Y["NPU attention 读取压缩后的有效 KV 视图"]
+    Y --> H
+```
+
+算法核心可以概括为四步：
+
+1. 离线或预先生成模型相关的 Q/K 频域统计，用于描述不同层、不同 KV head 的长期注意力偏好。
+2. 在线触发压缩时，从 paged KV cache 中读取候选 K，并结合 RoPE 频率、位置差和频域统计计算 token 重要性分数。
+3. 根据 `KV_BUDGET` 选出每个请求需要保留的 KV token，支持 per-head 或 shared 选择语义。
+4. 将保留 KV 搬移到连续有效区域，并把被驱逐 token 对应的 tail blocks 释放给 vLLM-Ascend 继续复用。
+
+## 3. 核心适配与开发点
 
 | 模块方向 | 主要改动 | 作用 |
 |---|---|---|
@@ -29,9 +85,9 @@
 | 可观测性 | 增加 execution path log、core trace、selector debug、phase/e2e/perf profile | 能判断请求是否真正进入 TriAttention core、scoring 是否启用、压缩是否生效 |
 | 测试与文档 | 增加 Ascend runtime 单测、vLLM-Ascend 文档、scoring 精度验证脚本 | 支撑后续回归验证和部署复现 |
 
-## 3. 关键开发内容展开
+## 4. 关键开发内容展开
 
-### 3.1 vLLM-Ascend 运行时接入
+### 4.1 vLLM-Ascend 运行时接入
 
 原始版本的 TriAttention 主要面向 vLLM/CUDA 或离线算法路径。当前版本增加了 vLLM-Ascend runtime patch，主要包括：
 
@@ -45,7 +101,7 @@
 - TriAttention 不再只是独立算法，而是能跟随 vLLM-Ascend 服务请求自动运行。
 - 用户通过环境变量即可启用/关闭和调整压缩参数。
 
-### 3.2 NPU attention metadata 适配
+### 4.2 NPU attention metadata 适配
 
 压缩 KV 后，如果只移动 KV tensor，而不修改 vLLM-Ascend 的输入元数据，NPU attention 仍会认为当前请求拥有原始长上下文长度。这样会导致 attention 读取已经被压缩/回收的旧位置，表现为重复 token、输出异常、越界或压缩不生效。
 
@@ -62,7 +118,7 @@
 - 保证模型 forward 看到的是“压缩后的有效 KV 视图”。
 - 保证 scheduler 仍保留逻辑上下文长度，而 worker/NPU attention 使用压缩后的物理视图。
 
-### 3.3 Ascend scoring 后端适配
+### 4.3 Ascend scoring 后端适配
 
 原始 TriAttention 的 vLLM scoring 路径依赖 CUDA Triton kernel。Ascend NPU 无法直接使用 CUDA Triton，因此当前版本增加了 Ascend 友好的 scoring 策略：
 
@@ -77,7 +133,7 @@
 - 让 TriAttention 的核心 sparse scoring 能在 Ascend 上运行。
 - 在保证选择语义尽量一致的前提下，控制 NPU 上 PyTorch eager 多 kernel scoring 的额外开销。
 
-### 3.4 KV compaction 与物理 block 回收
+### 4.4 KV compaction 与物理 block 回收
 
 当前版本不仅做“逻辑选择”，还实现了压缩后的实际 KV 搬移和 block 回收：
 
@@ -94,7 +150,7 @@
 - 使 KV usage 真正下降，而不是只在逻辑上“假装压缩”。
 - 释放出来的 block 可以被后续 decode 或其他并发请求复用。
 
-### 3.5 KV 驱逐关键 bug 修复
+### 4.5 KV 驱逐关键 bug 修复
 
 当前 `tri_zxj_version0615` 分支最后合入了旧版本 `other_code_sa/tri_xj` 中已验证的 KV eviction 修复，主要解决两个关键 bug 群：
 
@@ -114,7 +170,7 @@
 - 修复长上下文连续 decode 时的边界 OOB 和请求崩溃问题。
 - 使“压缩 + 回收 + 后续继续 decode”成为闭环。
 
-### 3.6 并发与批处理稳定性
+### 4.6 并发与批处理稳定性
 
 vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下每个请求的长度、压缩状态、block table 行号、slot mapping 都可能不同。当前版本围绕并发做了大量适配：
 
@@ -132,7 +188,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 - 减少压缩动作对整批 decode TPOT 的尖峰影响。
 - 避免请求之间状态串扰。
 
-### 3.7 prefill/decode 阶段压缩策略
+### 4.7 prefill/decode 阶段压缩策略
 
 长上下文请求通常包含大 prefill 和持续 decode。当前版本对压缩触发进行了阶段化控制：
 
@@ -148,7 +204,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 - 使首次压缩更容易发生在收益明确的边界。
 - 降低“压缩太频繁但释放很少”的无效成本。
 
-### 3.8 fast recency 与精度保护
+### 4.8 fast recency 与精度保护
 
 当前版本保留了 fast recency-only 路径，用于低开销诊断或极简压缩场景，但默认增加了精度保护：
 
@@ -162,7 +218,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 - 保留一个快速诊断路径，便于判断 runtime 是否接入成功。
 - 正式长上下文精度测试中，避免纯 recency 导致精度掉点。
 
-### 3.9 日志、profiling 与可验证性
+### 4.9 日志、profiling 与可验证性
 
 为了定位 Ascend 服务化路径中的问题，当前版本增加了多层观测能力：
 
@@ -178,7 +234,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 - 能区分“未触发压缩”“进入 pure recency”“进入 sparse scoring”“压缩事件未回传”等不同问题。
 - 支撑 TPOT、TTFT 和压缩开销分析。
 
-### 3.10 测试与文档建设
+### 4.10 测试与文档建设
 
 当前版本补充了针对 Ascend runtime 的单元测试和部署文档：
 
@@ -198,25 +254,25 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 - 将之前依赖手工复现的问题固化为可回归测试。
 - 降低后续调参、模型适配、vLLM-Ascend 版本升级时的回归风险。
 
-## 4. 当前版本相对原始版本的核心价值
+## 5. 当前版本相对原始版本的核心价值
 
-### 4.1 从算法原型到 Ascend 可运行 runtime
+### 5.1 从算法原型到 Ascend 可运行 runtime
 
 原始版本强调 TriAttention 的压缩算法本身；当前版本解决了算法落到 vLLM-Ascend 服务化推理时必须面对的工程问题，包括 NPU runner 接入、attention metadata 修正、KV cache layout 兼容、scheduler/worker 状态同步等。
 
-### 4.2 从逻辑压缩到真实 KV usage 下降
+### 5.2 从逻辑压缩到真实 KV usage 下降
 
 当前版本不仅选择保留哪些 token，还完成了 KV cache 原地搬移、tail block reclaim、block table 清理和 allocation 同步，因此可以真正降低 KV cache 使用量，并提升高并发长上下文下的可服务请求数。
 
-### 4.3 从单请求验证到多请求并发稳定
+### 5.3 从单请求验证到多请求并发稳定
 
 当前版本围绕 batch row、per-request effective length、scheduler rollback、decode block growth、每 step 压缩限流等做了系统适配，使算法能在 batch size > 1 和多并发服务场景下运行。
 
-### 4.4 从黑盒运行到可观测可诊断
+### 5.4 从黑盒运行到可观测可诊断
 
 通过 execution path、core trace、selector debug、phase profile、E2E profile 等机制，可以明确判断压缩是否触发、走的是 sparse scoring 还是 recency、是否发生物理回收，以及具体耗时落在哪个阶段。
 
-## 5. 汇报建议表述
+## 6. 汇报建议表述
 
 可以在课题汇报中按以下层次呈现：
 
@@ -229,11 +285,10 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 7. 稳定性层：修复跨进程事件传递、block 边界 OOB、scheduler/worker 状态不同步等关键 bug。
 8. 工程层：增加日志、profiling、测试和部署文档，形成可复现、可调优、可回归的版本。
 
-## 6. 当前仍需注意的边界
+## 7. 当前仍需注意的边界
 
 - sparse stats 必须与模型匹配；不同模型不应盲目共用同一个 stats 文件。
 - Ascend 当前 scoring 仍是 PyTorch/torch_npu eager 多 kernel 路径，后续若要进一步提升 TPOT，融合 scoring kernel 是重要优化方向。
 - prefix caching 与压缩 KV 语义不兼容，部署时需要关闭。
 - fast recency-only 更适合诊断或性能对照，长上下文精度测试应优先使用 sparse stats TriAttention。
 - 新模型如 Qwen3.5-27B 需要先确认 vLLM-Ascend baseline 支持，并生成该模型专用 stats 后再评估精度和性能收益。
-
