@@ -1,12 +1,12 @@
-# TriAttention vLLM-Ascend 版本开发与适配总结
+# TriAttention vLLM-Ascend 版本开发总结
 
-> 用途：课题汇报材料。本文从最原始版本到当前 `tri_zxj_version0615` 分支，凝练总结 TriAttention 在 vLLM-Ascend 场景下完成的核心适配、工程开发点及其作用。
+> 用途：课题汇报材料。本文从最原始版本到当前 `tri_zxj_version0615` 分支，凝练总结 TriAttention 在 vLLM-Ascend 场景下完成的核心开发点及其作用。
 >
 > 当前版本基线：`tri_zxj_version0615`，最新提交 `a9c07ef Add TriAttention Ascend docs`。
 
 ## 1. 总体定位
 
-原始 TriAttention 主要提供基于三角频域打分的 KV cache 压缩能力，用于在长上下文推理中减少 KV cache 占用。当前版本在此基础上完成了面向 vLLM-Ascend 服务化推理的工程化适配，使算法不仅能在理论/离线路径上工作，还能在 Ascend NPU、vLLM 调度器、多请求并发、块式 KV cache、压缩后物理回收等真实生产路径中稳定运行。
+原始 TriAttention 主要提供基于三角频域打分的 KV cache 压缩能力，用于在长上下文推理中减少 KV cache 占用。当前版本在此基础上完成了面向 vLLM-Ascend 服务化推理的工程化开发，使算法不仅能在理论/离线路径上工作，还能在 Ascend NPU、vLLM 调度器、多请求并发、块式 KV cache、压缩后物理回收等真实生产路径中稳定运行。
 
 一句话概括：
 
@@ -38,12 +38,12 @@ flowchart TD
 3. 根据 `KV_BUDGET` 选出每个请求需要保留的 KV token，支持 per-head 或 shared 选择语义。
 4. 将保留 KV 搬移到连续有效区域，并把被驱逐 token 对应的 tail blocks 释放给 vLLM-Ascend 继续复用。
 
-## 3. 核心适配与开发点
+## 3. 核心开发点
 
 | 模块方向 | 主要改动 | 作用 |
 |---|---|---|
 | vLLM-Ascend 接入 | 增加 NPUWorker / NPUModelRunner 运行时 patch，安装 TriAttention model runner proxy | 让 TriAttention 能接入 vLLM-Ascend 的执行链路，在服务化推理中自动触发压缩 |
-| Ascend 输入元数据适配 | patch `seq_lens`、`seq_lens_np`、slot mapping、block table 等输入准备逻辑 | 保证压缩后 NPU attention 只读取有效 KV，避免仍按原始长上下文读取导致重复 token、越界或错误结果 |
+| Ascend 输入元数据开发 | patch `seq_lens`、`seq_lens_np`、slot mapping、block table 等输入准备逻辑 | 保证压缩后 NPU attention 只读取有效 KV，避免仍按原始长上下文读取导致重复 token、越界或错误结果 |
 | Ascend scoring 后端 | 在 Ascend 上使用 PyTorch/torch_npu scoring，保留 CUDA Triton 路径 | 解决 CUDA Triton kernel 不能直接用于 NPU 的问题，使 sparse TriAttention 打分可在 Ascend 上运行 |
 | KV 压缩执行 | 支持 vLLM combined cache 和 vLLM-Ascend split cache 的原地 KV compaction | 将被选中的 KV token 重新排列到有效前缀，形成压缩后的 KV cache 视图 |
 | 物理 block 回收 | 增加 tail block reclaim、block table tail 清理、worker/engine 同步 | 让“逻辑压缩”真正转化为 KV cache 使用量下降，释放可复用物理块 |
@@ -71,11 +71,11 @@ flowchart TD
 - TriAttention 不再只是独立算法，而是能跟随 vLLM-Ascend 服务请求自动运行。
 - 用户通过环境变量即可启用/关闭和调整压缩参数。
 
-### 4.2 NPU attention metadata 适配
+### 4.2 NPU attention metadata 开发
 
 压缩 KV 后，如果只移动 KV tensor，而不修改 vLLM-Ascend 的输入元数据，NPU attention 仍会认为当前请求拥有原始长上下文长度。这样会导致 attention 读取已经被压缩/回收的旧位置，表现为重复 token、输出异常、越界或压缩不生效。
 
-当前版本完成了这些适配：
+当前版本完成了这些开发：
 
 - 将压缩后的有效长度写入 NPU `seq_lens` 和 CPU `seq_lens_np`。
 - 根据有效 KV 长度重建 slot mapping。
@@ -88,7 +88,7 @@ flowchart TD
 - 保证模型 forward 看到的是“压缩后的有效 KV 视图”。
 - 保证 scheduler 仍保留逻辑上下文长度，而 worker/NPU attention 使用压缩后的物理视图。
 
-### 4.3 Ascend scoring 后端适配
+### 4.3 Ascend scoring 后端开发
 
 原始 TriAttention 的 vLLM scoring 路径依赖 CUDA Triton kernel。Ascend NPU 无法直接使用 CUDA Triton，因此当前版本增加了 Ascend 友好的 scoring 策略：
 
@@ -142,7 +142,7 @@ flowchart TD
 
 ### 4.6 并发与批处理稳定性
 
-vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下每个请求的长度、压缩状态、block table 行号、slot mapping 都可能不同。当前版本围绕并发做了大量适配：
+vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下每个请求的长度、压缩状态、block table 行号、slot mapping 都可能不同。当前版本围绕并发做了大量开发：
 
 - 多请求 effective override，按 request / row 维护压缩后的 effective seq len。
 - batch row 变化后重建 Ascend V1 slot mapping。
@@ -222,7 +222,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 作用：
 
 - 将之前依赖手工复现的问题固化为可回归测试。
-- 降低后续调参、模型适配、vLLM-Ascend 版本升级时的回归风险。
+- 降低后续调参、模型支持、vLLM-Ascend 版本升级时的回归风险。
 
 ## 5. 当前版本相对原始版本的核心价值
 
@@ -236,7 +236,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 
 ### 5.3 从单请求验证到多请求并发稳定
 
-当前版本围绕 batch row、per-request effective length、scheduler rollback、decode block growth、每 step 压缩限流等做了系统适配，使算法能在 batch size > 1 和多并发服务场景下运行。
+当前版本围绕 batch row、per-request effective length、scheduler rollback、decode block growth、每 step 压缩限流等做了系统开发，使算法能在 batch size > 1 和多并发服务场景下运行。
 
 ### 5.4 从黑盒运行到可观测可诊断
 
@@ -248,7 +248,7 @@ vLLM-Ascend 服务化场景的难点不是单请求，而是多请求 batch 下�
 
 1. 算法层：保留 TriAttention 基于频域统计的 KV 重要性选择思想，用 `KV_BUDGET` 控制保留 token 数。
 2. 系统层：将算法接入 vLLM-Ascend runtime，支持 NPUWorker、NPUModelRunner、scheduler/worker 协同。
-3. 数据结构层：适配 Ascend split KV cache、block table、slot mapping、seq_lens 等执行元数据。
+3. 数据结构层：支持 Ascend split KV cache、block table、slot mapping、seq_lens 等执行元数据。
 4. 内存层：实现压缩后的物理 block 回收，使 KV usage 真正下降。
 5. 并发层：支持多请求 batch 下的 per-request effective KV 视图和状态同步。
 6. 性能层：增加 Ascend PyTorch/torch_npu scoring、layer cap、prefill 延迟压缩、zero-copy recency、压缩限流等优化。
