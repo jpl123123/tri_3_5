@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - vLLM-Ascend may not import CUDA worker
 from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
 from .hook_impl import install_runner_compression_hook
+from .prefill_phase import is_prefill_phase_for_limit
 from .runner import TriAttentionModelRunner
 from .thresholds import (
     compression_length_threshold,
@@ -175,17 +176,23 @@ def should_install_triattention_runner_proxy(
         if not bool(getattr(signal, "should_compress", False)):
             continue
         scheduled_tokens = max(1, int(getattr(signal, "scheduled_tokens", 1) or 1))
-        if defer_chunked_prefill and scheduled_tokens > 1:
+        actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
+        is_prefill_step = is_prefill_phase_for_limit(
+            scheduler_output=scheduler_output,
+            req_id=str(req_id),
+            scheduled_tokens=scheduled_tokens,
+            prefill_len=max(0, int(getattr(signal, "prefill_len", 0) or 0)),
+            num_computed_tokens=actual_kv,
+        )
+        if defer_chunked_prefill and is_prefill_step:
             continue
-        if scheduled_tokens > 1 and is_ascend and int(
+        if is_prefill_step and is_ascend and int(
             getattr(config, "prefill_max_compressions_on_ascend", 1) or 0
         ) == 0:
             continue
-        actual_kv = _get_actual_kv_from_model_runner(model_runner, str(req_id))
         if actual_kv is None or block_size is None:
             saw_trigger_without_worker_length = True
             continue
-        is_prefill_step = scheduled_tokens > 1
         if actual_kv >= _compression_threshold_for_signal(
             config,
             signal,

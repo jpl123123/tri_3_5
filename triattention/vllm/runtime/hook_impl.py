@@ -26,7 +26,10 @@ from .fast_recency_guard import (
     should_guard_fast_recency_long_context,
     uses_pure_fast_recency,
 )
-from .kv_group_resolver import resolve_group_tensors as _resolve_group_tensors
+from .kv_group_resolver import (
+    resolve_compressible_group_ids as _resolve_compressible_group_ids,
+    resolve_group_tensors as _resolve_group_tensors,
+)
 from .selector_hf import build_triattention_selector as _build_triattention_selector_impl
 from .signals import CompressionSignal
 from .thresholds import is_ascend_runtime
@@ -60,6 +63,7 @@ def make_runner_compression_hook(
             selector_status,
         ) = _build_triattention_selector(config)
     group_tensors_cache: dict[int, list[tuple[int, Any]]] | None = None
+    compressible_group_ids_cache: set[int] | None | bool = False
     compressed_once: set[str] = set()
     log_execution_path = bool(
         getattr(config, "logging_enabled", True)
@@ -94,6 +98,12 @@ def make_runner_compression_hook(
             group_tensors_cache = _resolve_group_tensors(base_runner)
         return group_tensors_cache
 
+    def _get_compressible_group_ids() -> set[int] | None:
+        nonlocal compressible_group_ids_cache
+        if compressible_group_ids_cache is False:
+            compressible_group_ids_cache = _resolve_compressible_group_ids(base_runner)
+        return compressible_group_ids_cache
+
     def _hook(req_id: str, signal: CompressionSignal, scheduler_output: Any) -> dict[str, Any]:
         setattr(base_runner, "_triattention_active_req_id", req_id)
         if log_execution_path:
@@ -127,6 +137,7 @@ def make_runner_compression_hook(
         if block_size_hint <= 0:
             block_size_hint = 1
         original_block_ids_by_group = getattr(req_state, "block_ids", None)
+        compressible_group_ids = _get_compressible_group_ids()
         runtime_ctx = build_hook_runtime_context(
             base_runner=base_runner,
             config=config,
@@ -138,6 +149,7 @@ def make_runner_compression_hook(
             compressed_once=compressed_once,
             original_block_ids_by_group=original_block_ids_by_group,
             block_size_hint=block_size_hint,
+            compressible_group_ids=compressible_group_ids,
         )
         num_computed_tokens = runtime_ctx.num_computed_tokens
         effective_tokens = runtime_ctx.effective_tokens
@@ -225,6 +237,7 @@ def make_runner_compression_hook(
             effective_tokens=effective_tokens,
             budget_total=budget_total,
             block_size=block_size,
+            compressible_group_ids=compressible_group_ids,
             retained_token_padding=retained_token_padding,
         )
         if zero_copy_outcome is not None:
@@ -307,6 +320,7 @@ def make_runner_compression_hook(
             retained_token_padding=retained_token_padding,
             mutable_block_ids_by_group=mutable_block_ids_by_group,
             group_tensors=group_tensors,
+            compressible_group_ids=compressible_group_ids,
             select_keep_indices=select_keep_indices,
             select_keep_indices_for_group=select_keep_indices_for_group,
             shared_compact_fn=compact_request_kv_in_place,

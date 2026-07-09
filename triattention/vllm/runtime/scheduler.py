@@ -392,12 +392,6 @@ class TriAttentionScheduler(Scheduler):
                     scheduled_tokens=scheduled_tokens_i,
                 )
                 continue
-            if (
-                _should_defer_prefill_compression_for_scheduler(self)
-                and scheduled_tokens_i > 1
-            ):
-                continue
-            is_prefill_step = scheduled_tokens_i > 1
             is_prefill_step_for_limit = is_prefill_phase_for_limit(
                 scheduler_output=scheduler_output,
                 req_id=req_id,
@@ -405,6 +399,12 @@ class TriAttentionScheduler(Scheduler):
                 prefill_len=prefill_len,
                 num_computed_tokens=int(getattr(request, "num_computed_tokens", 0)),
             )
+            is_prefill_step = is_prefill_step_for_limit
+            if (
+                _should_defer_prefill_compression_for_scheduler(self)
+                and is_prefill_step
+            ):
+                continue
             if (
                 _is_ascend_scheduler_instance(self)
                 and is_prefill_step_for_limit
@@ -616,6 +616,15 @@ class TriAttentionScheduler(Scheduler):
                     prefill_len = 0
             scheduled_tokens = int(event.get("scheduled_tokens", 1) or 1)
             num_computed_tokens = int(getattr(req, "num_computed_tokens", 0) or 0)
+            is_prefill_step_for_event = event.get("is_prefill_step")
+            if not isinstance(is_prefill_step_for_event, bool):
+                is_prefill_step_for_event = is_prefill_phase_for_limit(
+                    scheduler_output=None,
+                    req_id=str(req_id),
+                    scheduled_tokens=scheduled_tokens,
+                    prefill_len=prefill_len,
+                    num_computed_tokens=num_computed_tokens,
+                )
             scheduler_nct = event.get("scheduler_nct")
             effective_cache_len_current = resolve_current_effective_cache_len(
                 cache_len_after=effective_cache_len_after,
@@ -623,10 +632,7 @@ class TriAttentionScheduler(Scheduler):
                 num_computed_tokens=num_computed_tokens,
                 scheduled_tokens=scheduled_tokens,
             )
-            if (
-                scheduled_tokens > 1
-                or (prefill_len > 0 and num_computed_tokens < prefill_len)
-            ):
+            if is_prefill_step_for_event:
                 self._prefill_compression_counts[req_id] = (
                     self._prefill_compression_counts.get(req_id, 0) + 1
                 )
@@ -641,7 +647,6 @@ class TriAttentionScheduler(Scheduler):
                 cache_len_after=effective_cache_len_current,
             )
 
-            _evt_scheduled = int(event.get("scheduled_tokens", 1))
             if not self.triattention_config.enable_experimental_block_reclaim:
                 continue
             details = event.get("details")
@@ -677,6 +682,7 @@ class TriAttentionScheduler(Scheduler):
                 if isinstance(block_reclaim, dict)
                 else None
             )
+            has_explicit_reclaim_groups = isinstance(groups, list)
             if self.triattention_config.log_decisions:
                 logger.debug(
                     "TriAttention block reclaim: req=%s required_blocks=%d "
@@ -697,13 +703,13 @@ class TriAttentionScheduler(Scheduler):
                 # ran.  Without block_ids_before we cannot distinguish old
                 # blocks from new ones — skip synthesis to avoid freeing
                 # blocks the worker is still using.
-                if _evt_scheduled > 1:
+                if is_prefill_step_for_event:
                     if self.triattention_config.log_decisions:
                         logger.debug(
                             "TriAttention block reclaim: skipping synthesized "
                             "reclaim during prefill (no groups, "
                             "scheduled_tokens=%d) req=%s",
-                            _evt_scheduled, req_id,
+                            scheduled_tokens, req_id,
                         )
                 elif expected_shrink_gids and isinstance(managers, (list, tuple)):
                     for gid in sorted(expected_shrink_gids):
@@ -862,9 +868,11 @@ class TriAttentionScheduler(Scheduler):
             # Same safety as above: skip during chunked prefill without
             # block_ids_before to avoid freeing new blocks.
             missing_gids = expected_shrink_gids - seen_gids
+            if has_explicit_reclaim_groups:
+                missing_gids = set()
             if reclaim_mode == "remap_tail":
                 missing_gids = set()
-            if missing_gids and _evt_scheduled <= 1:
+            if missing_gids and not is_prefill_step_for_event:
                 for gid in sorted(missing_gids):
                     manager = managers[gid]
                     req_blocks = manager.req_to_blocks.get(req_id)
@@ -880,13 +888,13 @@ class TriAttentionScheduler(Scheduler):
                         )
                     if _free_reclaimed_blocks(manager, removed_blocks):
                         reclaim_applied_any = True
-            elif missing_gids and _evt_scheduled > 1:
+            elif missing_gids and is_prefill_step_for_event:
                 if self.triattention_config.log_decisions:
                     logger.debug(
                         "TriAttention block reclaim: skipping synthesized "
                         "reclaim for missing gids %s during prefill "
                         "(scheduled_tokens=%d) req=%s",
-                        sorted(missing_gids), _evt_scheduled, req_id,
+                        sorted(missing_gids), scheduled_tokens, req_id,
                     )
 
             if reclaim_applied_any:

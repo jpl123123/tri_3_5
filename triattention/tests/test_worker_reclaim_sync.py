@@ -128,6 +128,58 @@ def test_worker_reclaim_preserves_decode_slack_from_retained_cache_len():
     assert base_runner.requests["req-1"].block_ids == [list(range(1, 35))]
 
 
+def test_worker_reclaim_with_explicit_group_preserves_other_hybrid_groups():
+    table0 = _Table([[101, 102, 103, 104, 105, 106]])
+    table1 = _Table([[201, 202]])
+    block_table = SimpleNamespace(block_tables=[table0, table1])
+    base_runner = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        input_batch=SimpleNamespace(
+            req_id_to_index={"req-1": 0},
+            block_table=block_table,
+        ),
+        requests={
+            "req-1": SimpleNamespace(
+                block_ids=[
+                    [101, 102, 103, 104, 105, 106],
+                    [201, 202],
+                ]
+            )
+        },
+    )
+
+    apply_worker_block_reclaim_events(
+        base_runner=base_runner,
+        events=[
+            {
+                "status": "applied",
+                "req_id": "req-1",
+                "cache_len_after": 384,
+                "block_reclaim": {
+                    "mode": "truncate_tail",
+                    "groups": [
+                        {
+                            "gid": 0,
+                            "block_ids_before": [101, 102, 103, 104, 105, 106],
+                            "block_ids_after": [101, 102, 103],
+                            "block_ids_removed": [104, 105, 106],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert table0.num_blocks_per_row[0] == 3
+    assert table1.num_blocks_per_row[0] == 2
+    np.testing.assert_array_equal(table0.block_table.np[0], [101, 102, 103, 0, 0, 0])
+    np.testing.assert_array_equal(table1.block_table.np[0], [201, 202])
+    assert base_runner.requests["req-1"].block_ids == [
+        [101, 102, 103],
+        [201, 202],
+    ]
+
+
 def test_worker_reclaim_remap_rewrites_row_and_clears_stale_tail():
     table0 = _Table([[101, 102, 103, 104, 105, 106]])
     table1 = _Table([[201, 202, 203, 204, 205, 206]])

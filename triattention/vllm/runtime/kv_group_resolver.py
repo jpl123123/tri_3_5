@@ -9,6 +9,24 @@ import torch
 
 from .kv_compaction import register_kv_layout_axis_hint
 
+_NON_COMPRESSIBLE_LAYER_NAME_MARKERS = (
+    "linear_attn",
+    "mamba",
+    "gated_delta",
+    "gdn",
+)
+
+_NON_COMPRESSIBLE_SPEC_MARKERS = (
+    "mamba",
+    "encoderonlyattention",
+    "crossattention",
+)
+
+_COMPRESSIBLE_SPEC_MARKERS = (
+    "fullattention",
+    "mlaattention",
+)
+
 
 def infer_layer_idx(layer_name: str, layer_obj: Any, fallback_idx: int) -> int:
     for attr in ("layer_idx", "layer_id", "idx"):
@@ -88,6 +106,113 @@ def _kv_cache_ref_key(cache_ref: Any) -> tuple[int, ...]:
     )
 
 
+def _spec_ident(spec: Any) -> str:
+    spec_cls = spec if isinstance(spec, type) else spec.__class__
+    module_name = str(getattr(spec_cls, "__module__", ""))
+    cls_name = str(getattr(spec_cls, "__name__", ""))
+    return f"{module_name}.{cls_name}".lower()
+
+
+def _is_noncompressible_layer_name(layer_name: Any) -> bool:
+    ident = str(layer_name).lower()
+    return any(marker in ident for marker in _NON_COMPRESSIBLE_LAYER_NAME_MARKERS)
+
+
+def _looks_like_attention_layer_name(layer_name: Any) -> bool:
+    ident = str(layer_name).lower()
+    return "attn" in ident or "attention" in ident
+
+
+def _is_compressible_kv_spec(spec: Any) -> bool | None:
+    if spec is None:
+        return None
+
+    nested_specs = getattr(spec, "kv_cache_specs", None)
+    if isinstance(nested_specs, dict):
+        decisions = [
+            _is_compressible_kv_spec(nested_spec)
+            for nested_spec in nested_specs.values()
+        ]
+        known = [decision for decision in decisions if decision is not None]
+        if not known:
+            return None
+        return bool(known) and all(known)
+
+    ident = _spec_ident(spec)
+    if any(marker in ident for marker in _NON_COMPRESSIBLE_SPEC_MARKERS):
+        return False
+    if any(marker in ident for marker in _COMPRESSIBLE_SPEC_MARKERS):
+        return True
+    if ident.endswith("attentionspec"):
+        return True
+    return None
+
+
+def _group_spec_decision(group: Any, layer_names: list[Any]) -> bool | None:
+    group_spec = getattr(group, "kv_cache_spec", None)
+    nested_specs = getattr(group_spec, "kv_cache_specs", None)
+    if isinstance(nested_specs, dict):
+        decisions: list[bool | None] = []
+        for layer_name in layer_names:
+            layer_spec = nested_specs.get(layer_name)
+            decisions.append(_is_compressible_kv_spec(layer_spec))
+        known = [decision for decision in decisions if decision is not None]
+        if not known:
+            return None
+        return bool(known) and all(known)
+    return _is_compressible_kv_spec(group_spec)
+
+
+def is_compressible_kv_group(group: Any) -> bool | None:
+    """Return whether TriAttention can compact this KV-cache group.
+
+    Qwen3.5-style hybrid models expose both full-attention KV groups and
+    linear/mamba state groups. TriAttention should only move/reclaim the
+    full-attention KV groups; state-space groups are not token KV histories.
+    """
+    layer_names_raw = getattr(group, "layer_names", None)
+    if not isinstance(layer_names_raw, (list, tuple)):
+        return None
+    layer_names = list(layer_names_raw)
+    if not layer_names:
+        return None
+    if any(_is_noncompressible_layer_name(layer_name) for layer_name in layer_names):
+        return False
+
+    spec_decision = _group_spec_decision(group, layer_names)
+    if spec_decision is not None:
+        return spec_decision
+    if any(_looks_like_attention_layer_name(layer_name) for layer_name in layer_names):
+        return True
+    return None
+
+
+def resolve_compressible_group_ids(base_runner: Any) -> set[int] | None:
+    """Resolve KV-cache group ids that are safe for TriAttention compaction.
+
+    ``None`` means the runtime could not inspect group metadata and should keep
+    the legacy all-groups behavior.
+    """
+    kv_cache_config = getattr(base_runner, "kv_cache_config", None)
+    kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
+    if not isinstance(kv_cache_groups, (list, tuple)):
+        return None
+
+    group_ids: set[int] = set()
+    saw_known_decision = False
+    for gid, group in enumerate(kv_cache_groups):
+        decision = is_compressible_kv_group(group)
+        if decision is None:
+            continue
+        saw_known_decision = True
+        if decision:
+            group_ids.add(int(gid))
+
+    if not saw_known_decision:
+        return None
+    return group_ids
+
+
 def resolve_group_tensors(base_runner: Any) -> dict[int, list[tuple[int, Any]]]:
     """Resolve kv cache tensors for each kv cache group.
 
@@ -120,7 +245,11 @@ def resolve_group_tensors(base_runner: Any) -> dict[int, list[tuple[int, Any]]]:
     if not isinstance(kv_cache_groups, (list, tuple)):
         return group_tensors
 
+    compressible_group_ids = resolve_compressible_group_ids(base_runner)
+
     for gid, group in enumerate(kv_cache_groups):
+        if compressible_group_ids is not None and gid not in compressible_group_ids:
+            continue
         layer_names = getattr(group, "layer_names", None)
         if not isinstance(layer_names, (list, tuple)):
             continue

@@ -19,6 +19,11 @@ try:
 except Exception:  # pragma: no cover - fallback for lightweight tests
     _runtime_logger = logging.getLogger(__name__)
 
+
+class _StatsShapeMismatch(RuntimeError):
+    """Raised when sparse stats cannot score the current runtime KV shape."""
+
+
 def build_triattention_selector(
     config: TriAttentionRuntimeConfig,
     base_runner: Any | None = None,
@@ -374,6 +379,98 @@ def build_triattention_selector(
     def _kv_cache_device(kv_cache: Any) -> torch.device:
         return _kv_cache_key_tensor(kv_cache).device
 
+    def _kv_cache_head_dim(kv_cache: Any) -> int:
+        key_tensor = _kv_cache_key_tensor(kv_cache)
+        if key_tensor.ndim in {4, 5}:
+            return int(key_tensor.shape[-1])
+        raise RuntimeError(f"unsupported_kv_cache_rank:{key_tensor.ndim}")
+
+    def _runtime_freq_count_from_head_dim(head_dim: int) -> int:
+        return max(0, int(head_dim) // 2)
+
+    def _runtime_freq_count_from_kv_cache(kv_cache: Any) -> int:
+        return _runtime_freq_count_from_head_dim(_kv_cache_head_dim(kv_cache))
+
+    def _runtime_freq_count_from_keys(keys_dense: torch.Tensor) -> int:
+        return _runtime_freq_count_from_head_dim(int(keys_dense.shape[-1]))
+
+    def _stats_freq_count(
+        score_head_stats: dict[str, torch.Tensor],
+        score_freq_scale_sq: torch.Tensor,
+    ) -> tuple[int | None, str | None]:
+        freq_dims: dict[str, int] = {}
+        q_mean_complex = score_head_stats.get("q_mean_complex")
+        if isinstance(q_mean_complex, torch.Tensor) and q_mean_complex.ndim >= 2:
+            if int(q_mean_complex.shape[-1]) == 2 and q_mean_complex.ndim >= 3:
+                freq_dims["q_mean_complex"] = int(q_mean_complex.shape[-2])
+            else:
+                freq_dims["q_mean_complex"] = int(q_mean_complex.shape[-1])
+        q_abs_mean = score_head_stats.get("q_abs_mean")
+        if isinstance(q_abs_mean, torch.Tensor) and q_abs_mean.ndim >= 1:
+            freq_dims["q_abs_mean"] = int(q_abs_mean.shape[-1])
+        if isinstance(score_freq_scale_sq, torch.Tensor) and score_freq_scale_sq.ndim >= 1:
+            freq_dims["freq_scale_sq"] = int(score_freq_scale_sq.shape[-1])
+        omega = getattr(compressor, "omega", None)
+        if isinstance(omega, torch.Tensor) and omega.ndim >= 1:
+            freq_dims["omega"] = int(omega.shape[-1])
+        known_dims = {value for value in freq_dims.values() if value > 0}
+        if not known_dims:
+            return None, None
+        if len(known_dims) > 1:
+            details = ",".join(f"{name}={value}" for name, value in sorted(freq_dims.items()))
+            return None, f"stats_freq_internal_mismatch:{details}"
+        return known_dims.pop(), None
+
+    def _stats_shape_mismatch_reason(
+        *,
+        layer_idx: int,
+        runtime_freq_count: int,
+        score_head_stats: dict[str, torch.Tensor],
+        score_freq_scale_sq: torch.Tensor,
+    ) -> str | None:
+        stats_freq_count, internal_reason = _stats_freq_count(
+            score_head_stats,
+            score_freq_scale_sq,
+        )
+        if internal_reason is not None:
+            return f"{internal_reason}:layer={int(layer_idx)}"
+        if stats_freq_count is None or runtime_freq_count <= 0:
+            return None
+        if int(stats_freq_count) != int(runtime_freq_count):
+            return (
+                "stats_shape_mismatch:"
+                f"layer={int(layer_idx)}:"
+                f"stats_freq={int(stats_freq_count)}:"
+                f"runtime_freq={int(runtime_freq_count)}"
+            )
+        return None
+
+    stats_shape_mismatch_warnings: set[str] = set()
+
+    def _warn_stats_shape_mismatch_once(
+        *,
+        req_id: str | None,
+        gid: int | None,
+        layer_idx: int | None,
+        mode: str,
+        reason: str,
+    ) -> None:
+        key = f"{mode}:{layer_idx}:{reason}"
+        if key in stats_shape_mismatch_warnings:
+            return
+        stats_shape_mismatch_warnings.add(key)
+        _runtime_logger.warning(
+            "TriAttention sparse stats incompatible with runtime KV; "
+            "using recency fallback req=%s gid=%s layer=%s mode=%s "
+            "reason=%s stats_path=%s",
+            req_id,
+            gid,
+            layer_idx,
+            mode,
+            reason,
+            str(stats_path),
+        )
+
     def _slice_tensor_parallel_layer_stats(
         *,
         resolved_layer_idx: int,
@@ -487,6 +584,14 @@ def build_triattention_selector(
             layer_idx=layer_idx,
             runtime_heads=runtime_heads,
         )
+        mismatch_reason = _stats_shape_mismatch_reason(
+            layer_idx=layer_idx,
+            runtime_freq_count=_runtime_freq_count_from_keys(keys_dense),
+            score_head_stats=score_head_stats,
+            score_freq_scale_sq=score_freq_scale_sq,
+        )
+        if mismatch_reason is not None:
+            raise _StatsShapeMismatch(mismatch_reason)
 
         scores = _compute_layer_scores_raw(
             keys_dense=keys_dense,
@@ -513,7 +618,18 @@ def build_triattention_selector(
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, bool, int]:
         resolved_layer_idx = _resolve_layer_idx_for_stats(layer_idx)
         layer_head_stats = compressor.head_stats[resolved_layer_idx]
-        layer_freq_scale_sq = compressor.freq_scale_sq[resolved_layer_idx]
+        layer_freq_scale_sq = layer_head_stats.get("freq_scale_sq")
+        if not isinstance(layer_freq_scale_sq, torch.Tensor):
+            freq_scale_sq = getattr(compressor, "freq_scale_sq", None)
+            if (
+                isinstance(freq_scale_sq, torch.Tensor)
+                and 0 <= int(resolved_layer_idx) < int(freq_scale_sq.shape[0])
+            ):
+                layer_freq_scale_sq = freq_scale_sq[resolved_layer_idx]
+            else:
+                raise _StatsShapeMismatch(
+                    f"stats_freq_missing:layer={int(resolved_layer_idx)}"
+                )
         layer_head_stats, layer_freq_scale_sq = _slice_tensor_parallel_layer_stats(
             resolved_layer_idx=resolved_layer_idx,
             layer_stats=layer_head_stats,
@@ -592,6 +708,14 @@ def build_triattention_selector(
             if use_hf_group_max and group_size > 1
             else keys_dense
         )
+        mismatch_reason = _stats_shape_mismatch_reason(
+            layer_idx=-1,
+            runtime_freq_count=_runtime_freq_count_from_keys(score_inputs),
+            score_head_stats=score_head_stats,
+            score_freq_scale_sq=score_freq_scale_sq,
+        )
+        if mismatch_reason is not None:
+            raise _StatsShapeMismatch(mismatch_reason)
         try:
             if use_torch_scoring:
                 return compute_scores_pytorch(
@@ -615,6 +739,8 @@ def build_triattention_selector(
                 round_start=round_start,
                 trig_cache=getattr(compressor, "trig_cache", None),
             )
+        except _StatsShapeMismatch:
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"{TRITON_SCORING_REQUIRED_MARKER}:score_failed:{score_backend_name}:{type(exc).__name__}"
@@ -675,6 +801,14 @@ def build_triattention_selector(
             layer_idx=layer_idx,
             runtime_heads=runtime_heads,
         )
+        mismatch_reason = _stats_shape_mismatch_reason(
+            layer_idx=layer_idx,
+            runtime_freq_count=_runtime_freq_count_from_kv_cache(kv_cache),
+            score_head_stats=score_head_stats,
+            score_freq_scale_sq=score_freq_scale_sq,
+        )
+        if mismatch_reason is not None:
+            raise _StatsShapeMismatch(mismatch_reason)
         chunk_tokens = _score_chunk_tokens(block_size, total_tokens)
         chunks: list[torch.Tensor] = []
         start = 0
@@ -870,6 +1004,71 @@ def build_triattention_selector(
             debug["debug_score_layer_count_total"] = int(total_layer_count)
         return debug
 
+    def _recency_fallback_result(
+        *,
+        req_id: str | None,
+        gid: int | None,
+        layer_idx: int | None,
+        mode: str,
+        total_tokens: int,
+        prefill_len: int,
+        protect_prefill: bool,
+        budget_total: int,
+        chunk_tokens: int,
+        reason: str,
+        layer_indices: list[int] | None = None,
+        total_layer_count: int | None = None,
+    ) -> dict[str, Any] | None:
+        _warn_stats_shape_mismatch_once(
+            req_id=req_id,
+            gid=gid,
+            layer_idx=layer_idx,
+            mode=mode,
+            reason=reason,
+        )
+        keep_indices = build_keep_token_indices(
+            total_tokens=total_tokens,
+            kv_budget=budget_total,
+            prefill_len=prefill_len,
+            protect_prefill=protect_prefill,
+            include_prefill_in_budget=True,
+        )
+        if keep_indices is None:
+            _log_selector_scoring_exit(
+                req_id=req_id,
+                gid=gid,
+                layer_idx=layer_idx,
+                mode=mode,
+                result_mode=None,
+                keep_count=None,
+                reason=f"{reason}:recency_fallback_unavailable",
+                layer_indices=layer_indices,
+            )
+            return None
+        result = {
+            "mode": "shared",
+            "indices": keep_indices,
+            "semantic": "recency_fallback_stats_incompatible",
+            **_selector_debug(
+                execution_path=f"selector_hf>{mode}>recency_fallback",
+                total_tokens=total_tokens,
+                chunk_tokens=chunk_tokens,
+                layer_indices=layer_indices,
+                total_layer_count=total_layer_count,
+            ),
+        }
+        _log_selector_scoring_exit(
+            req_id=req_id,
+            gid=gid,
+            layer_idx=layer_idx,
+            mode=mode,
+            result_mode="shared:recency_fallback_stats_incompatible",
+            keep_count=_keep_count_for_log("shared", keep_indices),
+            reason=reason,
+            layer_indices=layer_indices,
+        )
+        return result
+
     def _select_keep_indices_paged_streaming(
         *,
         kv_cache: Any,
@@ -884,16 +1083,6 @@ def build_triattention_selector(
         req_id: str | None = None,
         gid: int | None = None,
     ) -> dict[str, Any]:
-        runtime_heads = _kv_cache_num_heads(kv_cache)
-        (
-            score_head_stats,
-            score_freq_scale_sq,
-            use_hf_group_max,
-            group_size,
-        ) = _resolve_layer_score_inputs(
-            layer_idx=layer_idx,
-            runtime_heads=runtime_heads,
-        )
         chunk_tokens = _score_chunk_tokens(block_size, total_tokens)
         _log_selector_scoring_enter(
             req_id=req_id,
@@ -906,6 +1095,40 @@ def build_triattention_selector(
             chunk_tokens=chunk_tokens,
             layer_indices=[int(layer_idx)],
         )
+        try:
+            runtime_heads = _kv_cache_num_heads(kv_cache)
+            (
+                score_head_stats,
+                score_freq_scale_sq,
+                use_hf_group_max,
+                group_size,
+            ) = _resolve_layer_score_inputs(
+                layer_idx=layer_idx,
+                runtime_heads=runtime_heads,
+            )
+            mismatch_reason = _stats_shape_mismatch_reason(
+                layer_idx=layer_idx,
+                runtime_freq_count=_runtime_freq_count_from_kv_cache(kv_cache),
+                score_head_stats=score_head_stats,
+                score_freq_scale_sq=score_freq_scale_sq,
+            )
+            if mismatch_reason is not None:
+                raise _StatsShapeMismatch(mismatch_reason)
+        except _StatsShapeMismatch as exc:
+            return _recency_fallback_result(
+                req_id=req_id,
+                gid=gid,
+                layer_idx=layer_idx,
+                mode="paged_layer",
+                total_tokens=total_tokens,
+                prefill_len=prefill_len,
+                protect_prefill=protect_prefill,
+                budget_total=budget_total,
+                chunk_tokens=chunk_tokens,
+                reason=str(exc),
+                layer_indices=[int(layer_idx)],
+                total_layer_count=1,
+            )
         k = min(budget_total, total_tokens)
         if k <= 0:
             _log_selector_scoring_exit(
@@ -1191,13 +1414,29 @@ def build_triattention_selector(
                 chunk_tokens=total_tokens,
                 layer_indices=[int(layer_idx)],
             )
-            scores = _compute_layer_scores(
-                keys_dense=keys_dense,
-                layer_idx=layer_idx,
-                round_start=round_start,
-                prefill_len=prefill_len,
-                protect_prefill=protect_prefill,
-            )
+            try:
+                scores = _compute_layer_scores(
+                    keys_dense=keys_dense,
+                    layer_idx=layer_idx,
+                    round_start=round_start,
+                    prefill_len=prefill_len,
+                    protect_prefill=protect_prefill,
+                )
+            except _StatsShapeMismatch as exc:
+                return _recency_fallback_result(
+                    req_id=req_id,
+                    gid=gid,
+                    layer_idx=layer_idx,
+                    mode="dense_layer",
+                    total_tokens=total_tokens,
+                    prefill_len=prefill_len,
+                    protect_prefill=protect_prefill,
+                    budget_total=budget_total,
+                    chunk_tokens=total_tokens,
+                    reason=str(exc),
+                    layer_indices=[int(layer_idx)],
+                    total_layer_count=1,
+                )
         elif kv_cache is not None and block_ids is not None and block_size is not None:
             paged_result = _select_keep_indices_paged_streaming(
                 kv_cache=kv_cache,
@@ -1383,29 +1622,54 @@ def build_triattention_selector(
                 )
                 return {"mode": "per_head", "indices": []}
             prepared_layers: list[dict[str, Any]] = []
-            for layer_idx, kv_cache, block_ids, layer_block_size in layer_entries:
-                runtime_heads = _kv_cache_num_heads(kv_cache)
-                (
-                    score_head_stats,
-                    score_freq_scale_sq,
-                    use_hf_group_max,
-                    group_size,
-                ) = _resolve_layer_score_inputs(
-                    layer_idx=layer_idx,
-                    runtime_heads=runtime_heads,
-                )
-                prepared_layers.append(
-                    {
-                        "layer_idx": layer_idx,
-                        "kv_cache": kv_cache,
-                        "block_ids": block_ids,
-                        "block_size": layer_block_size,
-                        "runtime_heads": runtime_heads,
-                        "score_head_stats": score_head_stats,
-                        "score_freq_scale_sq": score_freq_scale_sq,
-                        "use_hf_group_max": use_hf_group_max,
-                        "group_size": group_size,
-                    }
+            try:
+                for layer_idx, kv_cache, block_ids, layer_block_size in layer_entries:
+                    runtime_heads = _kv_cache_num_heads(kv_cache)
+                    (
+                        score_head_stats,
+                        score_freq_scale_sq,
+                        use_hf_group_max,
+                        group_size,
+                    ) = _resolve_layer_score_inputs(
+                        layer_idx=layer_idx,
+                        runtime_heads=runtime_heads,
+                    )
+                    mismatch_reason = _stats_shape_mismatch_reason(
+                        layer_idx=layer_idx,
+                        runtime_freq_count=_runtime_freq_count_from_kv_cache(kv_cache),
+                        score_head_stats=score_head_stats,
+                        score_freq_scale_sq=score_freq_scale_sq,
+                    )
+                    if mismatch_reason is not None:
+                        raise _StatsShapeMismatch(mismatch_reason)
+                    prepared_layers.append(
+                        {
+                            "layer_idx": layer_idx,
+                            "kv_cache": kv_cache,
+                            "block_ids": block_ids,
+                            "block_size": layer_block_size,
+                            "runtime_heads": runtime_heads,
+                            "score_head_stats": score_head_stats,
+                            "score_freq_scale_sq": score_freq_scale_sq,
+                            "use_hf_group_max": use_hf_group_max,
+                            "group_size": group_size,
+                        }
+                    )
+            except _StatsShapeMismatch as exc:
+                fallback_block_size = min(int(entry[3]) for entry in layer_entries)
+                return _recency_fallback_result(
+                    req_id=req_id,
+                    gid=gid,
+                    layer_idx=None,
+                    mode="paged_global_per_head",
+                    total_tokens=total_tokens,
+                    prefill_len=prefill_len,
+                    protect_prefill=protect_prefill,
+                    budget_total=budget_total,
+                    chunk_tokens=_score_chunk_tokens(fallback_block_size, total_tokens),
+                    reason=str(exc),
+                    layer_indices=[int(entry[0]) for entry in layer_entries],
+                    total_layer_count=total_layer_entries,
                 )
 
             prepared_layer_indices = [int(entry["layer_idx"]) for entry in prepared_layers]
@@ -1680,24 +1944,40 @@ def build_triattention_selector(
             )
             aggregated_scores: torch.Tensor | None = None
             layer_count = 0
-            for layer_idx, keys_dense in iter_inputs:
-                scores = _compute_layer_scores(
-                    keys_dense=keys_dense,
-                    layer_idx=layer_idx,
-                    round_start=round_start,
+            try:
+                for layer_idx, keys_dense in iter_inputs:
+                    scores = _compute_layer_scores(
+                        keys_dense=keys_dense,
+                        layer_idx=layer_idx,
+                        round_start=round_start,
+                        prefill_len=prefill_len,
+                        protect_prefill=protect_prefill,
+                    )
+                    if scores.ndim != 3:
+                        raise RuntimeError(
+                            f"unexpected_score_rank_for_per_head:{scores.ndim}"
+                        )
+                    layer_scores = scores[0]
+                    if aggregated_scores is None:
+                        aggregated_scores = layer_scores.clone()
+                    else:
+                        aggregated_scores.add_(layer_scores)
+                    layer_count += 1
+            except _StatsShapeMismatch as exc:
+                return _recency_fallback_result(
+                    req_id=req_id,
+                    gid=gid,
+                    layer_idx=None,
+                    mode=iter_mode,
+                    total_tokens=total_tokens,
                     prefill_len=prefill_len,
                     protect_prefill=protect_prefill,
+                    budget_total=budget_total,
+                    chunk_tokens=total_tokens,
+                    reason=str(exc),
+                    layer_indices=dense_layer_indices,
+                    total_layer_count=len(dense_layer_indices),
                 )
-                if scores.ndim != 3:
-                    raise RuntimeError(
-                        f"unexpected_score_rank_for_per_head:{scores.ndim}"
-                    )
-                layer_scores = scores[0]
-                if aggregated_scores is None:
-                    aggregated_scores = layer_scores.clone()
-                else:
-                    aggregated_scores.add_(layer_scores)
-                layer_count += 1
             if aggregated_scores is None or layer_count <= 0:
                 _log_selector_scoring_exit(
                     req_id=req_id,

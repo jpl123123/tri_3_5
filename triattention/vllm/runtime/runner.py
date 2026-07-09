@@ -511,11 +511,11 @@ class TriAttentionModelRunner:
         return signals
 
     def _get_actual_kv_from_block_table(self, req_id: str) -> int | None:
-        """Return actual KV token count from Worker's block table.
+        """Return worker block-table token capacity for ``req_id``.
 
-        Uses ``num_blocks_per_row * block_size`` which reflects the true
-        physical state, free of async Scheduler lag.  Returns *None* when
-        the information is unavailable (e.g. request not yet in input_batch).
+        The historical name is kept for compatibility with older tests and
+        debug tooling.  On vLLM-Ascend hybrid models this value can be a padded
+        worker capacity, not the logical KV length of the request.
         """
         input_batch = getattr(self._base_runner, "input_batch", None)
         if input_batch is None:
@@ -543,6 +543,36 @@ class TriAttentionModelRunner:
         if blk_size <= 0:
             return None
         return int(num_blocks_per_row[req_index]) * blk_size
+
+    def _resolve_first_compression_effective_kv(
+        self,
+        *,
+        req_state: Any,
+        prefill_len: int,
+        scheduled_tokens: int,
+        existing_estimate: int,
+    ) -> tuple[int, str] | None:
+        """Resolve logical KV length for a request before its first compression."""
+        candidates: list[tuple[int, str]] = []
+        existing_estimate_i = max(0, int(existing_estimate or 0))
+        if existing_estimate_i > 0:
+            candidates.append((existing_estimate_i, "scheduler_estimate"))
+        if req_state is not None:
+            num_computed = _safe_int(getattr(req_state, "num_computed_tokens", 0))
+            if num_computed is not None and num_computed > 0:
+                candidates.append((
+                    num_computed + max(0, int(scheduled_tokens)),
+                    "request_num_computed",
+                ))
+        prefill_len_i = max(0, int(prefill_len or 0))
+        if prefill_len_i > 0:
+            candidates.append((
+                prefill_len_i + max(0, int(scheduled_tokens)),
+                "prefill_len",
+            ))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])
 
     def _is_worker_block_table_capacity_boundary(
         self,
@@ -701,10 +731,6 @@ class TriAttentionModelRunner:
             existing_estimate = int(
                 getattr(existing, "estimated_cache_len", 0) or 0
             ) if existing is not None else 0
-            is_prefill_step_for_threshold = (
-                scheduled_tokens_i > 1
-                or (prefill_len > 0 and 0 < existing_estimate < prefill_len)
-            )
             req_state = None
             requests = getattr(self._base_runner, "requests", None)
             if isinstance(requests, dict):
@@ -720,6 +746,9 @@ class TriAttentionModelRunner:
                 scheduled_tokens=scheduled_tokens_i,
                 prefill_len=prefill_len,
                 num_computed_tokens=num_computed_tokens,
+            )
+            is_prefill_step_for_threshold = is_prefill_step_for_limit or (
+                prefill_len > 0 and 0 < existing_estimate < prefill_len
             )
             if defer_chunked_prefill and is_prefill_step_for_threshold:
                 if existing is not None and existing.should_compress:
@@ -782,10 +811,11 @@ class TriAttentionModelRunner:
                     scheduler_had_signal=bool(existing),
                 )
                 continue
-            # Compute actual KV length on the Worker side.
+            # Compute logical KV length on the Worker side.
             # kv_includes_scheduled: the source already includes the current
             # step's scheduled tokens, so scheduled_tokens must NOT be added.
-            kv_from_blocks = False
+            kv_source = "unknown"
+            block_capacity = self._get_actual_kv_from_block_table(req_id)
             kv_includes_scheduled = False
             if state.compression_count > 0 and state.current_cache_len > 0:
                 actual_kv = self._advance_compressed_cache_len_for_step(
@@ -793,23 +823,19 @@ class TriAttentionModelRunner:
                     state=state,
                     scheduled_tokens=scheduled_tokens_i,
                 )
+                kv_source = "compressed_state"
                 kv_includes_scheduled = True
             else:
-                # First-time compression: use block table for ground truth.
-                # num_computed_tokens from base_runner.requests has async lag
-                # (Scheduler runs 2-3 chunks ahead), so we derive actual KV
-                # from the physical block count on the Worker side.
-                actual_kv_bt = self._get_actual_kv_from_block_table(req_id)
-                if actual_kv_bt is not None:
-                    actual_kv = actual_kv_bt
-                    kv_from_blocks = True
-                    kv_includes_scheduled = True
-                else:
-                    # Fallback: base_runner.requests (may be stale).
-                    if req_state is not None:
-                        actual_kv = int(getattr(req_state, "num_computed_tokens", 0))
-                    else:
-                        continue
+                resolved = self._resolve_first_compression_effective_kv(
+                    req_state=req_state,
+                    prefill_len=prefill_len,
+                    scheduled_tokens=scheduled_tokens_i,
+                    existing_estimate=existing_estimate,
+                )
+                if resolved is None:
+                    continue
+                actual_kv, kv_source = resolved
+                kv_includes_scheduled = True
             threshold = self._compression_threshold(
                 prefill_len,
                 is_prefill_step=is_prefill_step_for_threshold,
@@ -851,22 +877,25 @@ class TriAttentionModelRunner:
                         self._logger.debug(
                             "TriAttention dropped long-context fast-recency "
                             "trigger: req=%s effective_kv=%d prefill_len=%d "
-                            "guard_tokens=%d scheduled=%d from_blocks=%s",
+                            "guard_tokens=%d scheduled=%d kv_source=%s "
+                            "block_capacity=%s",
                             req_id,
                             effective_kv,
                             prefill_len,
                             guard_tokens,
                             scheduled_tokens_i,
-                            kv_from_blocks,
+                            kv_source,
+                            block_capacity,
                         )
                 self._log_execution_path_trigger_guard(
                     req_id=req_id,
                     reason="fast_recency_long_context_guard",
-                    actual_kv=actual_kv,
                     effective_kv=effective_kv,
-                    from_blocks=kv_from_blocks,
+                    block_capacity=block_capacity,
                     guard_tokens=guard_tokens,
                     hint="set_sparse_stats_path_or_disable_long_context_guard",
+                    kv_source=kv_source,
+                    logical_kv=actual_kv,
                     prefill_len=prefill_len,
                     scheduled=scheduled_tokens_i,
                     scheduler_had_signal=bool(existing),
@@ -885,20 +914,35 @@ class TriAttentionModelRunner:
                     if self.config.log_decisions:
                         self._logger.debug(
                             "TriAttention dropped stale scheduler trigger below "
-                            "worker threshold: req=%s actual_kv=%d effective_kv=%d "
-                            "threshold=%d scheduled=%d from_blocks=%s",
+                            "worker threshold: req=%s logical_kv=%d effective_kv=%d "
+                            "threshold=%d scheduled=%d kv_source=%s "
+                            "block_capacity=%s",
                             req_id, actual_kv, effective_kv, threshold,
-                            scheduled_tokens, kv_from_blocks,
+                            scheduled_tokens, kv_source, block_capacity,
                         )
                     self._log_execution_path_trigger_guard(
                         req_id=req_id,
                         reason="below_worker_threshold",
-                        actual_kv=actual_kv,
                         effective_kv=effective_kv,
-                        from_blocks=kv_from_blocks,
+                        block_capacity=block_capacity,
+                        kv_source=kv_source,
+                        logical_kv=actual_kv,
                         prefill_len=prefill_len,
                         scheduled=scheduled_tokens_i,
                         scheduler_had_signal=True,
+                        threshold=threshold,
+                    )
+                elif block_capacity is not None and int(block_capacity) >= int(threshold):
+                    self._log_execution_path_trigger_guard(
+                        req_id=req_id,
+                        reason="below_worker_threshold",
+                        effective_kv=effective_kv,
+                        block_capacity=block_capacity,
+                        kv_source=kv_source,
+                        logical_kv=actual_kv,
+                        prefill_len=prefill_len,
+                        scheduled=scheduled_tokens_i,
+                        scheduler_had_signal=False,
                         threshold=threshold,
                     )
                 continue
@@ -924,11 +968,11 @@ class TriAttentionModelRunner:
                 continue
             if self.config.log_decisions:
                 self._logger.info(
-                    "TriAttention worker self-trigger: req=%s actual_kv=%d "
+                    "TriAttention worker self-trigger: req=%s logical_kv=%d "
                     "effective_kv=%d scheduled=%d threshold=%d "
-                    "from_blocks=%s scheduler_had_signal=%s",
+                    "kv_source=%s block_capacity=%s scheduler_had_signal=%s",
                     req_id, actual_kv, effective_kv, scheduled_tokens,
-                    threshold, kv_from_blocks, bool(existing),
+                    threshold, kv_source, block_capacity, bool(existing),
                 )
             signals[req_id] = CompressionSignal(
                 req_id=req_id,

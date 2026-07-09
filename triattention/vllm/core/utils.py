@@ -7,10 +7,15 @@ This module provides helper functions for:
 - Debugging utilities
 """
 from pathlib import Path
+import logging
 from typing import Dict, Optional, Tuple
 
 import torch
-from vllm.logger import logger
+
+try:
+    from vllm.logger import logger
+except Exception:  # pragma: no cover - fallback for lightweight tests/scripts
+    logger = logging.getLogger(__name__)
 
 
 def load_frequency_stats(
@@ -168,7 +173,7 @@ def _convert_rkv_stats(
                 layer_nums.add(int(parts[0].replace("layer", "")))
                 head_nums.add(int(parts[1].replace("head", "")))
 
-    num_layers = len(layer_nums)
+    num_layers = (max(layer_nums) + 1) if layer_nums else 0
     num_attention_heads = len(head_nums)
     head_dim = rkv_metadata.get("head_dim", 128)
     freq_count = head_dim // 2

@@ -192,16 +192,20 @@ def apply_worker_block_reclaim_events(
             retained_cache_len = cache_len_after
         required_blocks = (retained_cache_len + block_size - 1) // block_size
         reclaim_mode, groups_by_gid = _event_reclaim_groups(event)
+        has_explicit_reclaim_groups = bool(groups_by_gid)
 
         for gid, table in enumerate(tables):
+            group_payload = groups_by_gid.get(gid)
+            if has_explicit_reclaim_groups and group_payload is None:
+                continue
             num_blocks_per_row = getattr(table, "num_blocks_per_row", None)
             if num_blocks_per_row is None:
                 continue
             if not isinstance(num_blocks_per_row, np.ndarray):
                 continue
             current = int(num_blocks_per_row[req_index])
+            block_ids_after = _block_ids_after(group_payload)
             if reclaim_mode == "remap_tail":
-                block_ids_after = _block_ids_after(groups_by_gid.get(gid))
                 if block_ids_after is not None:
                     if _rewrite_table_row(table, req_index, block_ids_after):
                         if runtime_logging_enabled():
@@ -217,18 +221,23 @@ def apply_worker_block_reclaim_events(
                             req_id, gid, type(table).__name__,
                         )
                     continue
-            if current > required_blocks:
-                num_blocks_per_row[req_index] = required_blocks
+            target_blocks = (
+                len(block_ids_after)
+                if block_ids_after is not None
+                else required_blocks
+            )
+            if current > target_blocks:
+                num_blocks_per_row[req_index] = target_blocks
                 if runtime_logging_enabled():
                     logger.debug(
                         "TriAttention worker reclaim: req=%s num_blocks %d -> %d "
                         "(cache_len_after=%d block_size=%d)",
-                        req_id, current, required_blocks, cache_len_after, block_size,
+                        req_id, current, target_blocks, cache_len_after, block_size,
                     )
             _clear_table_row_tail(
                 table,
                 req_index,
-                _row_block_count(table, req_index, min(current, required_blocks)),
+                _row_block_count(table, req_index, min(current, target_blocks)),
             )
 
         # Also truncate req_state.block_ids (CPU-side block tracking).
@@ -258,9 +267,32 @@ def apply_worker_block_reclaim_events(
                             else:
                                 setattr(req_state, "block_ids", rewritten_groups)
                     else:
-                        for group_blocks in block_ids_attr:
+                        rewritten_groups: list[Any] = []
+                        changed_tuple_group = False
+                        for gid, group_blocks in enumerate(block_ids_attr):
+                            group_payload = groups_by_gid.get(gid)
+                            if has_explicit_reclaim_groups and group_payload is None:
+                                rewritten_groups.append(group_blocks)
+                                continue
+                            block_ids_after = _block_ids_after(group_payload)
+                            if block_ids_after is not None:
+                                if isinstance(group_blocks, list):
+                                    group_blocks[:] = list(block_ids_after)
+                                    rewritten_groups.append(group_blocks)
+                                else:
+                                    rewritten_groups.append(tuple(block_ids_after))
+                                    changed_tuple_group = True
+                                continue
                             if (
                                 isinstance(group_blocks, list)
                                 and len(group_blocks) > required_blocks
                             ):
                                 del group_blocks[required_blocks:]
+                                rewritten_groups.append(group_blocks)
+                            else:
+                                rewritten_groups.append(group_blocks)
+                        if changed_tuple_group:
+                            if isinstance(block_ids_attr, tuple):
+                                setattr(req_state, "block_ids", tuple(rewritten_groups))
+                            else:
+                                setattr(req_state, "block_ids", rewritten_groups)

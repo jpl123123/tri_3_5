@@ -82,13 +82,16 @@ def scheduled_tokens_for_req(scheduler_output: Any, req_id: str) -> int:
 def min_block_capacity_tokens(
     block_ids_by_group: Any,
     block_size: int,
+    group_ids: set[int] | None = None,
 ) -> int | None:
     if block_size <= 0:
         return None
     if not isinstance(block_ids_by_group, (list, tuple)):
         return None
     capacities: list[int] = []
-    for group_block_ids in block_ids_by_group:
+    for gid, group_block_ids in enumerate(block_ids_by_group):
+        if group_ids is not None and int(gid) not in group_ids:
+            continue
         if not isinstance(group_block_ids, (list, tuple)):
             continue
         capacities.append(len(group_block_ids) * block_size)
@@ -128,10 +131,12 @@ def build_hook_runtime_context(
     compressed_once: set[str],
     original_block_ids_by_group: Any,
     block_size_hint: int,
+    compressible_group_ids: set[int] | None = None,
 ) -> HookRuntimeContext:
     block_capacity_hint = min_block_capacity_tokens(
         block_ids_by_group=original_block_ids_by_group,
         block_size=block_size_hint,
+        group_ids=compressible_group_ids,
     )
 
     scheduled_tokens = scheduled_tokens_for_req(

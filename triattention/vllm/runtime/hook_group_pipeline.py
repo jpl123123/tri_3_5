@@ -81,6 +81,7 @@ def try_build_recency_tail_block_remap(
     effective_tokens: int,
     budget_total: int,
     block_size: int,
+    compressible_group_ids: set[int] | None = None,
     retained_token_padding: int = 0,
 ) -> GroupPipelineOutcome | None:
     """Zero-copy fast path for recency-only, block-aligned tail retention.
@@ -115,6 +116,9 @@ def try_build_recency_tail_block_remap(
     remapped_any = False
 
     for gid, normalized_block_ids in enumerate(mutable_block_ids_by_group):
+        if compressible_group_ids is not None and int(gid) not in compressible_group_ids:
+            remapped_block_ids_by_group.append(normalized_block_ids)
+            continue
         if not normalized_block_ids:
             remapped_block_ids_by_group.append(normalized_block_ids)
             continue
@@ -211,6 +215,7 @@ def run_group_compaction_pipeline(
     select_keep_indices_for_group: Callable[..., dict[str, Any] | None] | None,
     shared_compact_fn: Callable[..., Any],
     per_head_compact_fn: Callable[..., Any],
+    compressible_group_ids: set[int] | None = None,
     gather_dense_fn: Callable[..., torch.Tensor] | None = None,
     retained_token_padding: int = 0,
 ) -> GroupPipelineOutcome | dict[str, Any]:
@@ -239,6 +244,16 @@ def run_group_compaction_pipeline(
     )
 
     for gid, normalized_block_ids in enumerate(mutable_block_ids_by_group):
+        if compressible_group_ids is not None and int(gid) not in compressible_group_ids:
+            _core_trace(
+                config,
+                "skip run_group_compaction_pipeline_group req=%s step=%d gid=%d "
+                "reason=noncompressible_group",
+                req_id,
+                step,
+                int(gid),
+            )
+            continue
         if not normalized_block_ids:
             _core_trace(
                 config,

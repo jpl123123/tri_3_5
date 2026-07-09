@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import TRITON_SCORING_REQUIRED_MARKER
+from .prefill_phase import is_prefill_phase_for_limit
 from .signals import CompressionSignal
 
 
@@ -63,6 +64,24 @@ def execute_runner_compression_actions(
         signals,
         max_compressions_per_step=max_compressions_per_step,
     )
+
+    def _event_common(signal: CompressionSignal) -> dict[str, int | bool]:
+        scheduled_tokens = int(getattr(signal, "scheduled_tokens", 1))
+        prefill_len = int(getattr(signal, "prefill_len", 0))
+        is_prefill_step = is_prefill_phase_for_limit(
+            scheduler_output=scheduler_output,
+            req_id=str(getattr(signal, "req_id", "")),
+            scheduled_tokens=scheduled_tokens,
+            prefill_len=prefill_len,
+            num_computed_tokens=None,
+        )
+        return {
+            "scheduled_tokens": scheduled_tokens,
+            "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
+            "prefill_len": prefill_len,
+            "is_prefill_step": is_prefill_step,
+        }
+
     for req_id in delayed_req_ids:
         signal = signals[req_id]
         if hasattr(state_store, "mark_compression_skipped"):
@@ -79,9 +98,7 @@ def execute_runner_compression_actions(
                 "reason": "compression_step_limited",
                 "cache_len_after": None,
                 "details": {"max_compressions_per_step": max_compressions_per_step},
-                "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
-                "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                **_event_common(signal),
             }
         )
     for req_id, signal in signal_items:
@@ -124,11 +141,7 @@ def execute_runner_compression_actions(
                         "reason": "batch_queue_dedup",
                         "cache_len_after": None,
                         "details": {"last_compression_step": last_step},
-                        "scheduled_tokens": sched_tokens,
-                        "estimated_cache_len": int(
-                            getattr(signal, "estimated_cache_len", 0)
-                        ),
-                        "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                        **_event_common(signal),
                     }
                 )
                 continue
@@ -188,9 +201,7 @@ def execute_runner_compression_actions(
                     "status": "error",
                     "reason": f"executor_exception:{type(exc).__name__}",
                     "cache_len_after": None,
-                    "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                    "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
-                    "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                    **_event_common(signal),
                 }
             )
             continue
@@ -318,9 +329,7 @@ def execute_runner_compression_actions(
                     "cache_len_after": cache_len_after,
                     "scheduler_nct": _sched_nct,
                     "details": result.details,
-                    "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                    "estimated_cache_len": int(getattr(signal, "estimated_cache_len", 0)),
-                    "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                    **_event_common(signal),
                     "block_reclaim": (
                         result.details.get("block_reclaim")
                         if isinstance(result.details, dict)
@@ -357,11 +366,7 @@ def execute_runner_compression_actions(
                 "reason": result.reason,
                 "cache_len_after": result.cache_len_after,
                 "details": details,
-                "scheduled_tokens": int(getattr(signal, "scheduled_tokens", 1)),
-                "estimated_cache_len": int(
-                    getattr(signal, "estimated_cache_len", 0)
-                ),
-                "prefill_len": int(getattr(signal, "prefill_len", 0)),
+                **_event_common(signal),
             }
         )
     return events

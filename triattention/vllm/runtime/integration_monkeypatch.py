@@ -24,6 +24,7 @@ from .kv_allocation_sync import (
 from .input_patch_backend import install_runtime_input_patch
 from .logging_control import runtime_logging_enabled
 from .planner import CompressionPlanner
+from .prefill_phase import is_prefill_phase_for_limit
 from .request_key_compat import iter_scheduled_token_items
 from .runner_output_bridge import _read_triattention_events_from_kv_cache_events
 from .scheduler import TriAttentionScheduler
@@ -549,8 +550,16 @@ def _scheduler_output_has_compression_boundary(scheduler_output: Any) -> bool:
     for sig in signals.values():
         if not bool(getattr(sig, "should_compress", False)):
             continue
+        req_id = str(getattr(sig, "req_id", ""))
         scheduled_tokens = max(1, int(getattr(sig, "scheduled_tokens", 1) or 1))
-        if scheduled_tokens > 1 and _should_defer_prefill_boundary():
+        is_prefill_step = is_prefill_phase_for_limit(
+            scheduler_output=scheduler_output,
+            req_id=req_id,
+            scheduled_tokens=scheduled_tokens,
+            prefill_len=max(0, int(getattr(sig, "prefill_len", 0) or 0)),
+            num_computed_tokens=None,
+        )
+        if is_prefill_step and _should_defer_prefill_boundary():
             continue
         return True
     return False

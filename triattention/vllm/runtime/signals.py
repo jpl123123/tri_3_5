@@ -22,7 +22,7 @@ class CompressionSignal:
     protect_prefill: bool
     prefill_len: int
     # Number of tokens scheduled for this request in the current scheduler step.
-    # For chunked prefill this can be >1.
+    # This can be >1 for chunked prefill or speculative decode validation.
     scheduled_tokens: int = 1
     # Worker-local hard boundary triggers cannot be delayed without risking a
     # slot write past the current block-table capacity.

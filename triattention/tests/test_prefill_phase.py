@@ -5,6 +5,7 @@ from triattention.vllm.runtime.hook_runtime_context import build_hook_runtime_co
 from triattention.vllm.runtime.prefill_phase import (
     is_prefill_phase_for_limit,
     is_request_scheduled_as_prefill,
+    is_request_scheduled_as_spec_decode,
 )
 from triattention.vllm.runtime.signals import CompressionSignal
 
@@ -169,6 +170,67 @@ def test_prefill_phase_uses_scheduler_new_reqs():
     )
 
 
+def test_spec_decode_multi_token_step_is_not_prefill_after_prompt():
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_spec_decode_tokens={"req-1": [11, 12, 13]},
+    )
+
+    assert is_request_scheduled_as_spec_decode(scheduler_output, "req-1")
+    assert not is_prefill_phase_for_limit(
+        scheduler_output=scheduler_output,
+        req_id="req-1",
+        scheduled_tokens=4,
+        prefill_len=10000,
+        num_computed_tokens=10000,
+    )
+
+
+def test_spec_decode_multi_token_step_still_prefill_when_scheduled_as_new_req():
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(req_id="req-1")],
+        scheduled_spec_decode_tokens={"req-1": [11, 12, 13]},
+    )
+
+    assert is_prefill_phase_for_limit(
+        scheduler_output=scheduler_output,
+        req_id="req-1",
+        scheduled_tokens=4,
+        prefill_len=10000,
+        num_computed_tokens=9000,
+    )
+
+
+def test_multi_token_without_spec_decode_remains_prefill():
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_spec_decode_tokens={},
+    )
+
+    assert is_prefill_phase_for_limit(
+        scheduler_output=scheduler_output,
+        req_id="req-1",
+        scheduled_tokens=4,
+        prefill_len=10000,
+        num_computed_tokens=None,
+    )
+
+
+def test_non_spec_multi_token_step_keeps_chunked_prefill_semantics():
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_spec_decode_tokens={},
+    )
+
+    assert is_prefill_phase_for_limit(
+        scheduler_output=scheduler_output,
+        req_id="req-1",
+        scheduled_tokens=4,
+        prefill_len=10000,
+        num_computed_tokens=10000,
+    )
+
+
 def test_decode_after_compression_is_not_prefill_limit():
     context = build_hook_runtime_context(
         base_runner=_AscendRunner(),
@@ -241,6 +303,60 @@ def test_decode_recompress_not_deferred_at_physical_capacity_boundary():
     )
 
     assert context.effective_tokens == 4352
+    assert not context.should_defer_recompress
+    assert context.defer_reason is None
+
+
+def test_hybrid_short_linear_group_does_not_cap_full_attention_length():
+    signal = CompressionSignal(
+        req_id="req-1",
+        should_compress=True,
+        reason="length_threshold",
+        estimated_cache_len=32091,
+        step=1,
+        kv_usage=None,
+        protect_prefill=False,
+        prefill_len=32089,
+        scheduled_tokens=1,
+    )
+
+    context = build_hook_runtime_context(
+        base_runner=_AscendRunner(),
+        config=TriAttentionRuntimeConfig(
+            enable_experimental_kv_compaction=True,
+            defer_prefill_compression_on_ascend=False,
+            kv_budget=6144,
+            min_reclaim_blocks_on_ascend=1,
+        ),
+        req_id="req-1",
+        req_state=SimpleNamespace(
+            num_computed_tokens=32090,
+            block_ids=[
+                [1] * 22,
+                [2] * 2,
+            ],
+        ),
+        req_runtime_state=SimpleNamespace(
+            compression_count=0,
+            current_cache_len=0,
+            last_absorbed_cache_len=0,
+        ),
+        signal=signal,
+        scheduler_output=SimpleNamespace(
+            scheduled_new_reqs=[],
+            num_scheduled_tokens={"req-1": 1},
+        ),
+        compressed_once=set(),
+        original_block_ids_by_group=[
+            [1] * 22,
+            [2] * 2,
+        ],
+        block_size_hint=1536,
+        compressible_group_ids={0},
+    )
+
+    assert context.effective_tokens == 32090
+    assert context.budget_total == 6144
     assert not context.should_defer_recompress
     assert context.defer_reason is None
 

@@ -162,6 +162,51 @@ def test_runner_keeps_existing_signal_on_first_decode_core_entry():
     assert logger.lines == []
 
 
+def test_runner_first_compression_ignores_inflated_block_table_capacity():
+    logger = _Logger()
+    base_runner = _AscendRunner()
+    base_runner.cache_config = types.SimpleNamespace(block_size=1536)
+    base_runner.requests = {
+        "req-1": types.SimpleNamespace(num_computed_tokens=20543),
+    }
+    state_store = _StateStore()
+    state_store.state = types.SimpleNamespace(
+        prefill_len=20543,
+        compression_count=0,
+        current_cache_len=0,
+        current_cache_len_step=-1,
+        current_cache_len_semantics="unknown",
+    )
+    runner = object.__new__(TriAttentionModelRunner)
+    runner.config = TriAttentionRuntimeConfig(
+        kv_budget=1536,
+        divide_length=128,
+        min_reclaim_blocks_on_ascend=16,
+        prefill_min_reclaim_blocks_on_ascend=32,
+        defer_prefill_compression_on_ascend=False,
+        log_decisions=True,
+    )
+    runner._base_runner = base_runner
+    runner.state_store = state_store
+    runner._last_step = 2289
+    runner._logger = logger
+    runner._log_execution_path = True
+    runner._log_execution_path_core_only = False
+    runner._logged_execution_path_trigger_guards = set()
+    runner._get_actual_kv_from_block_table = lambda req_id: 258048
+
+    signals = runner._supplement_worker_self_triggers(
+        types.SimpleNamespace(num_scheduled_tokens={"req-1": 1}),
+        {},
+    )
+
+    assert signals == {}
+    assert state_store.skipped is None
+    assert any("reason=below_worker_threshold" in line for line in logger.lines)
+    assert any("effective_kv=20544" in line for line in logger.lines)
+    assert any("block_capacity=258048" in line for line in logger.lines)
+
+
 def test_runner_keeps_existing_signal_at_worker_block_boundary():
     logger = _Logger()
     base_runner = _AscendRunner()

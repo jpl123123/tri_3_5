@@ -71,6 +71,27 @@ def test_zero_copy_tail_remap_borrows_slack_blocks_on_aligned_tail():
     assert outcome.block_reclaim_groups[0].block_ids_removed == list(range(48))
 
 
+def test_zero_copy_tail_remap_skips_noncompressible_hybrid_group():
+    outcome = try_build_recency_tail_block_remap(
+        config=_config(),
+        mutable_block_ids_by_group=[
+            list(range(80)),
+            [200, 201],
+        ],
+        effective_tokens=10000,
+        budget_total=2048,
+        block_size=128,
+        compressible_group_ids={0},
+    )
+
+    assert outcome is not None
+    assert outcome.mutable_block_ids_by_group == [
+        list(range(63, 79)),
+        [200, 201],
+    ]
+    assert [group.gid for group in outcome.block_reclaim_groups] == [0]
+
+
 def test_truncate_tail_reclaim_preserves_current_decode_write_block():
     kept, removed, group = truncate_tail_reclaim_group(
         gid=0,

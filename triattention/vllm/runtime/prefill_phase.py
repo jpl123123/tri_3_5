@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .request_key_compat import req_id_from_scheduled_key
+
 
 def is_request_scheduled_as_prefill(scheduler_output: Any, req_id: str) -> bool:
     """Return whether the scheduler reports this request as a new/prefill item.
@@ -25,6 +27,26 @@ def is_request_scheduled_as_prefill(scheduler_output: Any, req_id: str) -> bool:
     return False
 
 
+def is_request_scheduled_as_spec_decode(scheduler_output: Any, req_id: str) -> bool:
+    """Return whether this request is validating speculative draft tokens."""
+    scheduled_spec_decode_tokens = getattr(
+        scheduler_output,
+        "scheduled_spec_decode_tokens",
+        None,
+    )
+    if not isinstance(scheduled_spec_decode_tokens, dict):
+        return False
+    for raw_key, draft_token_ids in scheduled_spec_decode_tokens.items():
+        candidate = req_id_from_scheduled_key(raw_key)
+        if candidate != req_id:
+            continue
+        try:
+            return len(draft_token_ids) > 0
+        except Exception:
+            return bool(draft_token_ids)
+    return False
+
+
 def is_prefill_phase_for_limit(
     *,
     scheduler_output: Any,
@@ -42,7 +64,13 @@ def is_prefill_phase_for_limit(
     """
     if is_request_scheduled_as_prefill(scheduler_output, req_id):
         return True
-    if int(scheduled_tokens) > 1:
+    is_spec_decode_step = is_request_scheduled_as_spec_decode(
+        scheduler_output,
+        req_id,
+    )
+    if is_spec_decode_step:
+        return False
+    if int(scheduled_tokens) > 1 and not is_spec_decode_step:
         return True
     if prefill_len <= 0 or num_computed_tokens is None:
         return False
