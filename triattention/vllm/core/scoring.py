@@ -110,7 +110,17 @@ def compute_scores_triton(
     from .kernels.triton_scoring import triattention_scoring
 
     batch_size, num_kv_heads, seq_len, head_dim = key_states.shape
-    freq_count = head_dim // 2
+    # Resolve rotary geometry for partial rotary models (e.g. Qwen3.5).
+    rotary_dim = (
+        config.rotary_dim
+        if getattr(config, "rotary_dim", None) is not None
+        else head_dim
+    )
+    freq_count = (
+        config.freq_count
+        if getattr(config, "freq_count", None) is not None
+        else rotary_dim // 2
+    )
 
     # Extract Q statistics from head_stats
     q_mean_complex = head_stats['q_mean_complex']  # [num_kv_heads, freq_count, 2]
@@ -195,6 +205,7 @@ def compute_scores_triton(
         trig_cache=active_trig_cache,
         trig_values=active_trig_values,
         rope_style=config.rope_style,
+        rotary_dim=rotary_dim,
     )  # [batch, num_kv_heads, seq_len]
 
     # For per_layer mode, aggregate across heads
@@ -253,7 +264,20 @@ def compute_scores_pytorch(
         Importance scores [batch, num_kv_heads, seq_len] or [batch, seq_len]
     """
     batch_size, num_kv_heads, seq_len, head_dim = key_states.shape
-    freq_count = head_dim // 2
+    # Resolve rotary geometry: partial rotary models (e.g. Qwen3.5 with
+    # partial_rotary_factor=0.25) only rotate a prefix of head_dim. The scoring
+    # formula's complex pairing and phase terms apply to the rotary portion only;
+    # the non-rotary tail has no position information and must be excluded.
+    rotary_dim = (
+        config.rotary_dim
+        if getattr(config, "rotary_dim", None) is not None
+        else head_dim
+    )
+    freq_count = (
+        config.freq_count
+        if getattr(config, "freq_count", None) is not None
+        else rotary_dim // 2
+    )
     score_device = key_states.device
 
     # Match the Triton kernel's numerical contract: K, Q statistics, RoPE
@@ -287,15 +311,18 @@ def compute_scores_pytorch(
         q_abs_mean = q_mean_abs
 
     # Convert K to complex representation according to the configured RoPE layout.
-    # Qwen-family models use "half" layout: [r0, r1, ..., i0, i1, ...].
+    # Only the rotary portion (first rotary_dim elements) participates in complex
+    # pairing. The non-rotary tail (rotary_dim:head_dim) has no position info
+    # and no offline Q statistics, so it is excluded from scoring entirely.
     if config.rope_style == "interleaved":
-        k_pairs = key_states.reshape(batch_size, num_kv_heads, seq_len, freq_count, 2)
+        k_rotary = key_states[..., :rotary_dim]
+        k_pairs = k_rotary.reshape(batch_size, num_kv_heads, seq_len, freq_count, 2)
         k_real = k_pairs[..., 0]
         k_imag = k_pairs[..., 1]
     else:
-        half_dim = head_dim // 2
-        k_real = key_states[..., :half_dim]
-        k_imag = key_states[..., half_dim:]
+        half_rotary = rotary_dim // 2  # == freq_count
+        k_real = key_states[..., :half_rotary]
+        k_imag = key_states[..., half_rotary:rotary_dim]
     k_abs = torch.sqrt(k_real ** 2 + k_imag ** 2)  # [batch, num_kv_heads, seq_len, freq_count]
 
     # Compute Q * conj(K_rot) directly. This is the mathematically equivalent

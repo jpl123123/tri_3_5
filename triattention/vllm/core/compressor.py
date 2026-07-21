@@ -102,6 +102,27 @@ class TriAttentionCompressor:
         if "rope_style" in self.metadata:
             self.config.rope_style = str(self.metadata["rope_style"])
 
+        # Resolve partial-rotary geometry from stats metadata.
+        # Models like Qwen3.5 use partial_rotary_factor < 1.0, meaning only a
+        # prefix of head_dim is rotated by RoPE. The scoring formula only applies
+        # to the rotary portion; the non-rotary tail has no position info and
+        # must be excluded from complex pairing.
+        partial_rotary_factor_raw = self.metadata.get("partial_rotary_factor")
+        if partial_rotary_factor_raw is not None:
+            self.config.partial_rotary_factor = float(partial_rotary_factor_raw)
+        rotary_dim_raw = self.metadata.get("rotary_dim")
+        if rotary_dim_raw is not None:
+            self.config.rotary_dim = int(rotary_dim_raw)
+        elif self.config.rotary_dim is None:
+            self.config.rotary_dim = int(
+                int(self.config.head_dim) * self.config.partial_rotary_factor
+            )
+        freq_count_raw = self.metadata.get("freq_count")
+        if freq_count_raw is not None:
+            self.config.freq_count = int(freq_count_raw)
+        elif self.config.freq_count is None:
+            self.config.freq_count = int(self.config.rotary_dim) // 2
+
         # Initialize RoPE frequencies
         self._init_rope()
 
@@ -127,11 +148,14 @@ class TriAttentionCompressor:
         inv_freq_raw = self.metadata.get("inv_freq")
         if isinstance(inv_freq_raw, torch.Tensor):
             inv_freq = inv_freq_raw.to(device=self.config.device, dtype=torch.float32)
-            expected_freq_count = int(self.config.head_dim) // 2
+            expected_freq_count = int(self.config.freq_count)
             if inv_freq.numel() < expected_freq_count:
                 raise ValueError(
                     "metadata.inv_freq has fewer elements than required by "
-                    f"head_dim={self.config.head_dim}: got {inv_freq.numel()}, "
+                    f"rotary_dim={self.config.rotary_dim} "
+                    f"(head_dim={self.config.head_dim}, "
+                    f"partial_rotary_factor={self.config.partial_rotary_factor}): "
+                    f"got {inv_freq.numel()}, "
                     f"expected at least {expected_freq_count}"
                 )
             self.inv_freq = inv_freq[:expected_freq_count].contiguous()
@@ -141,11 +165,14 @@ class TriAttentionCompressor:
                 device=self.config.device,
                 dtype=torch.float32,
             )
-            expected_freq_count = int(self.config.head_dim) // 2
+            expected_freq_count = int(self.config.freq_count)
             if inv_freq.numel() < expected_freq_count:
                 raise ValueError(
                     "metadata.inv_freq has fewer elements than required by "
-                    f"head_dim={self.config.head_dim}: got {inv_freq.numel()}, "
+                    f"rotary_dim={self.config.rotary_dim} "
+                    f"(head_dim={self.config.head_dim}, "
+                    f"partial_rotary_factor={self.config.partial_rotary_factor}): "
+                    f"got {inv_freq.numel()}, "
                     f"expected at least {expected_freq_count}"
                 )
             self.inv_freq = inv_freq[:expected_freq_count].contiguous()
@@ -173,7 +200,7 @@ class TriAttentionCompressor:
                         derived_inv_freq = inv_freq.to(
                             device=self.config.device,
                             dtype=torch.float32,
-                        )[: int(self.config.head_dim) // 2].contiguous()
+                        )[: int(self.config.freq_count)].contiguous()
                         self.config.rope_style = str(
                             getattr(rotary, "_rope_style", self.config.rope_style)
                         )
@@ -185,7 +212,7 @@ class TriAttentionCompressor:
             else:
                 rope_theta = self.metadata.get("rope_theta", 10000.0)
                 self.inv_freq = compute_rope_frequencies(
-                    self.config.head_dim,
+                    self.config.rotary_dim,
                     rope_theta=rope_theta,
                     device=self.config.device,
                 )
@@ -201,7 +228,7 @@ class TriAttentionCompressor:
         """
         num_layers = self.config.num_layers
         num_kv_heads = self.config.num_kv_heads
-        freq_count = self.config.head_dim // 2
+        freq_count = self.config.freq_count
 
         # Allocate freq_scale_sq tensor
         self.freq_scale_sq = torch.zeros(

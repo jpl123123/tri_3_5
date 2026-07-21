@@ -176,7 +176,23 @@ def _convert_rkv_stats(
     num_layers = (max(layer_nums) + 1) if layer_nums else 0
     num_attention_heads = len(head_nums)
     head_dim = rkv_metadata.get("head_dim", 128)
-    freq_count = head_dim // 2
+
+    # Resolve partial rotary geometry: models like Qwen3.5 use
+    # partial_rotary_factor < 1.0, so freq_count = rotary_dim // 2, not
+    # head_dim // 2. Prefer explicit metadata fields when available.
+    partial_rotary_factor = float(
+        rkv_metadata.get("partial_rotary_factor", 1.0) or 1.0
+    )
+    rotary_dim_raw = rkv_metadata.get("rotary_dim")
+    if rotary_dim_raw is not None:
+        rotary_dim = int(rotary_dim_raw)
+    else:
+        rotary_dim = int(int(head_dim) * partial_rotary_factor)
+    freq_count_raw = rkv_metadata.get("freq_count")
+    if freq_count_raw is not None:
+        freq_count = int(freq_count_raw)
+    else:
+        freq_count = int(rotary_dim) // 2
 
     # Handle GQA: if num_kv_heads specified and < num_attention_heads
     if num_kv_heads is None:
@@ -240,6 +256,9 @@ def _convert_rkv_stats(
         "rope_type": rkv_metadata.get("rope_type"),
         "rope_theta": rkv_metadata.get("rope_theta", 10000.0),
         "gqa_ratio": gqa_ratio,
+        "partial_rotary_factor": partial_rotary_factor,
+        "rotary_dim": rotary_dim,
+        "freq_count": freq_count,
         # Preserve original metadata
         "rkv_metadata": rkv_metadata,
     }
@@ -280,7 +299,7 @@ def _convert_rkv_stats(
                 )
                 freq_scale = compute_frequency_scaling(
                     rotary=rotary,
-                    head_dim=head_dim,
+                    head_dim=rotary_dim,
                     dtype=dtype,
                     device=device,
                 ).to(device=device, dtype=dtype)

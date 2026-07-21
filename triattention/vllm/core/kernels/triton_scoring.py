@@ -509,6 +509,7 @@ def triattention_scoring(
     trig_values: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     rope_style: str = "interleaved",
     disable_mlr: bool = False,
+    rotary_dim: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Python wrapper for Triton scoring kernel.
@@ -548,6 +549,16 @@ def triattention_scoring(
 
     batch_size, num_heads, seq_len, head_dim = K_rot.shape
     freq_count = q_mean_real.shape[1]
+
+    # For partial rotary models (e.g. Qwen3.5), only the first rotary_dim
+    # elements of head_dim are rotated. Slice K to the rotary portion so the
+    # kernel's half_dim = head_dim // 2 logic applies correctly. The non-rotary
+    # tail has no position info and no offline Q statistics, so it is excluded.
+    if rotary_dim is not None and rotary_dim < head_dim:
+        K_rot = K_rot[..., :rotary_dim].contiguous()
+        head_dim = rotary_dim
+    elif rotary_dim is None:
+        rotary_dim = head_dim
 
     # Validate inputs
     assert head_dim % 2 == 0, "head_dim must be even for complex pairing"
