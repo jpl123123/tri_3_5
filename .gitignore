@@ -53,3 +53,7 @@ longlive_models
 wan_models
 example/
 longlive/__pycache__/
+
+# TriAttention build artifacts & run logs
+kernel_meta/
+script_runtest/test_logs/
