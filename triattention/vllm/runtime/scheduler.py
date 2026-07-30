@@ -568,6 +568,36 @@ class TriAttentionScheduler(Scheduler):
 
         return scheduler_output
 
+    def _resolve_group_block_sizes(self, managers: Any) -> list[int]:
+        """Return per-gid physical KV-cache block sizes.
+
+        On vLLM versions where the scheduler's ``self.block_size`` is the LCM
+        of every KV-cache group's block size (multi-group hybrid/MTP models),
+        physical reclaim accounting must use the group's own block size rather
+        than the LCM. This reads
+        ``kv_cache_config.kv_cache_groups[gid].kv_cache_spec.block_size`` and
+        falls back to ``self.block_size`` per group when unavailable.
+        """
+        fallback = max(1, int(getattr(self, "block_size", 1) or 1))
+        try:
+            kv_cache_config = getattr(self, "kv_cache_config", None)
+            groups = getattr(kv_cache_config, "kv_cache_groups", None)
+        except Exception:
+            groups = None
+        if not isinstance(groups, (list, tuple)) or not groups:
+            n = len(managers) if isinstance(managers, (list, tuple)) else 0
+            return [fallback] * max(n, 0)
+        sizes: list[int] = []
+        for g in groups:
+            spec = getattr(g, "kv_cache_spec", None)
+            bs = getattr(spec, "block_size", None)
+            try:
+                bs = int(bs)
+            except Exception:
+                bs = 0
+            sizes.append(bs if bs > 0 else fallback)
+        return sizes
+
     def _apply_compression_events(self, compression_events: list[dict[str, Any]]) -> None:
         self._ensure_runtime_fields()
         coordinator = getattr(self.kv_cache_manager, "coordinator", None)
@@ -575,14 +605,26 @@ class TriAttentionScheduler(Scheduler):
         block_size = int(getattr(self, "block_size", 1))
         if block_size <= 0:
             block_size = 1
+        # Resolve per-group physical block sizes. On vLLM versions where the
+        # scheduler's ``self.block_size`` is the LCM of all KV-cache group
+        # block sizes (multi-group hybrid/MTP models, e.g. Qwen3.5-MTP on
+        # vLLM-Ascend v0.23.0), using ``self.block_size`` to convert a token
+        # length into a block count yields the wrong (much smaller) number of
+        # blocks. Each KV-cache group has its own physical block size on
+        # ``kv_cache_config.kv_cache_groups[gid].kv_cache_spec.block_size``;
+        # we use that for per-gid reclaim accounting and fall back to
+        # ``self.block_size`` when the group spec is unavailable.
+        group_block_sizes = self._resolve_group_block_sizes(managers)
         if self.triattention_config.log_decisions:
             logger.debug(
                 "TriAttention _apply_compression_events: kv_cache_manager=%s "
-                "coordinator=%s managers=%s block_size=%d reclaim_enabled=%s",
+                "coordinator=%s managers=%s block_size=%d "
+                "group_block_sizes=%s reclaim_enabled=%s",
                 type(self.kv_cache_manager).__name__,
                 type(coordinator).__name__ if coordinator else None,
                 type(managers).__name__ if managers else None,
                 block_size,
+                group_block_sizes,
                 getattr(self, "triattention_config", None)
                 and self.triattention_config.enable_experimental_block_reclaim,
             )
@@ -591,6 +633,24 @@ class TriAttentionScheduler(Scheduler):
             if token_len <= 0:
                 return 0
             return (token_len + block_size - 1) // block_size
+
+        def _num_required_blocks_for_gid(token_len: int, gid: int) -> int:
+            """Per-gid required block count using the group's physical block size.
+
+            Falls back to the (possibly LCM) ``self.block_size`` when the
+            group's own block size cannot be resolved. This keeps the
+            historical single-group behavior intact while making multi-group
+            hybrid models (where scheduler block_size is an LCM) reclaim the
+            correct number of physical blocks.
+            """
+            if token_len <= 0:
+                return 0
+            bs = group_block_sizes[gid] if gid < len(group_block_sizes) else block_size
+            if bs <= 0:
+                bs = block_size
+                if bs <= 0:
+                    bs = 1
+            return (token_len + bs - 1) // bs
 
         for event in compression_events:
             if event.get("status") != "applied":
@@ -658,13 +718,24 @@ class TriAttentionScheduler(Scheduler):
             if not isinstance(retained_cache_len, int):
                 retained_cache_len = cache_len_after
             required_blocks = _num_required_blocks(retained_cache_len)
+            # Per-gid required block counts using each group's physical block
+            # size. On multi-group hybrid/MTP models the scheduler's
+            # ``self.block_size`` is the LCM of group block sizes, so the
+            # gid-agnostic ``required_blocks`` above can be far smaller than
+            # the real per-group count. The per-gid map drives reclaim
+            # accounting so it matches what the worker actually freed.
+            required_blocks_by_gid: dict[int, int] = {}
             expected_shrink_gids: set[int] = set()
             reclaim_applied_any = False
             req_groups_seen = 0
             if isinstance(managers, (list, tuple)):
                 for gid, manager in enumerate(managers):
                     req_blocks = manager.req_to_blocks.get(req_id)
-                    if req_blocks and required_blocks < len(req_blocks):
+                    gid_required = _num_required_blocks_for_gid(
+                        retained_cache_len, gid
+                    )
+                    required_blocks_by_gid[gid] = gid_required
+                    if req_blocks and gid_required < len(req_blocks):
                         expected_shrink_gids.add(gid)
                     if req_blocks:
                         req_groups_seen += 1
@@ -715,10 +786,13 @@ class TriAttentionScheduler(Scheduler):
                     for gid in sorted(expected_shrink_gids):
                         manager = managers[gid]
                         req_blocks = manager.req_to_blocks.get(req_id)
-                        if not req_blocks or required_blocks >= len(req_blocks):
+                        gid_required = required_blocks_by_gid.get(
+                            gid, required_blocks
+                        )
+                        if not req_blocks or gid_required >= len(req_blocks):
                             continue
-                        kept_blocks = req_blocks[:required_blocks]
-                        removed_blocks = req_blocks[required_blocks:]
+                        kept_blocks = req_blocks[:gid_required]
+                        removed_blocks = req_blocks[gid_required:]
                         manager.req_to_blocks[req_id] = kept_blocks
                         if req_id in manager.num_cached_block:
                             manager.num_cached_block[req_id] = min(
@@ -832,12 +906,12 @@ class TriAttentionScheduler(Scheduler):
                             False,
                         )
                         and gid in expected_shrink_gids
-                        and kept_len != required_blocks
+                        and kept_len != required_blocks_by_gid.get(gid, required_blocks)
                     ):
                         raise RuntimeError(
                             "TriAttention block reclaim insufficient shrink: "
                             f"req={req_id} gid={gid} kept_len={kept_len} "
-                            f"required_blocks={required_blocks}"
+                            f"required_blocks={required_blocks_by_gid.get(gid, required_blocks)}"
                         )
                     kept_old_blocks = list(req_blocks[:kept_len])
                     removed_old_blocks = list(req_blocks[kept_len:original_count])
@@ -876,10 +950,13 @@ class TriAttentionScheduler(Scheduler):
                 for gid in sorted(missing_gids):
                     manager = managers[gid]
                     req_blocks = manager.req_to_blocks.get(req_id)
-                    if not req_blocks or required_blocks >= len(req_blocks):
+                    gid_required = required_blocks_by_gid.get(
+                        gid, required_blocks
+                    )
+                    if not req_blocks or gid_required >= len(req_blocks):
                         continue
-                    kept_blocks = req_blocks[:required_blocks]
-                    removed_blocks = req_blocks[required_blocks:]
+                    kept_blocks = req_blocks[:gid_required]
+                    removed_blocks = req_blocks[gid_required:]
                     manager.req_to_blocks[req_id] = kept_blocks
                     if req_id in manager.num_cached_block:
                         manager.num_cached_block[req_id] = min(
