@@ -8,7 +8,7 @@ This module provides helper functions for:
 """
 from pathlib import Path
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -23,6 +23,7 @@ def load_frequency_stats(
     device: torch.device,
     dtype: torch.dtype = torch.bfloat16,
     num_kv_heads: Optional[int] = None,
+    model_path: Optional[Path] = None,
 ) -> Tuple[Dict, Dict]:
     """Load precomputed frequency statistics from file.
 
@@ -30,6 +31,14 @@ def load_frequency_stats(
         stats_path: Path to stats file (.pt or .pth format)
         device: Device to load tensors onto
         dtype: Data type for loaded tensors
+        num_kv_heads: Number of KV heads (for GQA mapping). If None, uses num_attention_heads.
+        model_path: Optional runtime model path. When stats metadata does not
+            carry ``model_name``/``model_path`` (e.g. legacy Qwen3 stats), this
+            is used as a fallback to derive RoPE ``inv_freq`` and
+            ``freq_scale_sq`` from the real model config, instead of falling
+            back to ``ones``/``compute_rope_frequencies``. Passing the runtime
+            model path here keeps legacy full-rotary stats (Qwen3) aligned with
+            the model's actual rotary semantics.
 
     Returns:
         Tuple of (metadata, head_stats)
@@ -102,7 +111,9 @@ def load_frequency_stats(
 
     if is_rkv_format:
         # Convert R-KV format to TriAttention format
-        metadata, head_stats = _convert_rkv_stats(stats, device, dtype, num_kv_heads)
+        metadata, head_stats = _convert_rkv_stats(
+            stats, device, dtype, num_kv_heads, model_path=model_path
+        )
         return metadata, head_stats
 
     # TriAttention format - validate required keys
@@ -142,6 +153,7 @@ def _convert_rkv_stats(
     device: torch.device,
     dtype: torch.dtype,
     num_kv_heads: Optional[int] = None,
+    model_path: Optional[Path] = None,
 ) -> Tuple[Dict, Dict]:
     """Convert R-KV stats format to TriAttention format.
 
@@ -156,6 +168,12 @@ def _convert_rkv_stats(
         device: Target device
         dtype: Target dtype
         num_kv_heads: Number of KV heads (for GQA). If None, uses num_attention_heads.
+        model_path: Optional runtime model path. Used as a fallback to derive
+            RoPE ``inv_freq`` and ``freq_scale_sq`` from the real model config
+            when the R-KV stats metadata does not carry ``model_name``/
+            ``model_path`` (e.g. legacy Qwen3 stats). This is important for
+            keeping full-rotary models (Qwen3) aligned with the model's actual
+            rotary semantics instead of falling back to ``ones``.
 
     Returns:
         Tuple of (metadata, head_stats) in TriAttention format
@@ -205,6 +223,13 @@ def _convert_rkv_stats(
 
         This keeps runtime scoring aligned with model rotary semantics (e.g. YaRN)
         when R-KV metadata does not explicitly carry inv_freq.
+
+        Fallback order for the model source:
+        1. ``metadata.inv_freq`` (tensor or list) carried in the stats file.
+        2. ``model_name`` / ``model_path`` stored inside the R-KV metadata.
+        3. The runtime ``model_path`` passed into ``load_frequency_stats`` /
+           ``_convert_rkv_stats`` (e.g. legacy Qwen3 stats carry no model info,
+           but the vLLM runtime knows the model path).
         """
         inv_freq_raw = rkv_metadata.get("inv_freq")
         if isinstance(inv_freq_raw, torch.Tensor):
@@ -218,20 +243,27 @@ def _convert_rkv_stats(
             )
             return inv_freq[:freq_count].contiguous()
 
+        # Prefer model info baked into the stats metadata; otherwise fall back
+        # to the runtime model path (legacy Qwen3 stats have neither).
+        model_candidates: list[Any] = []
         model_id = rkv_metadata.get("model_name", rkv_metadata.get("model_path"))
         if model_id:
+            model_candidates.append(model_id)
+        if model_path is not None:
+            model_candidates.append(str(model_path))
+        for candidate in model_candidates:
             try:
                 from transformers import AutoConfig
                 from triattention.common.rope_utils import build_rotary
 
-                model_path = Path(str(model_id))
+                cand_path = Path(str(candidate))
                 model_config = AutoConfig.from_pretrained(
-                    str(model_id),
+                    str(candidate),
                     trust_remote_code=True,
                 )
                 rotary = build_rotary(
                     cache_device=device,
-                    model_path=model_path,
+                    model_path=cand_path,
                     dtype=dtype,
                     config=model_config,
                 )
@@ -241,10 +273,18 @@ def _convert_rkv_stats(
                         :freq_count
                     ].contiguous()
             except Exception:
-                pass
+                continue
         return None
 
     derived_inv_freq = _derive_inv_freq_fallback()
+    # Track where inv_freq came from so the compressor diagnostic can
+    # distinguish "stats carried inv_freq" from "derived from runtime model".
+    if rkv_metadata.get("inv_freq") is not None:
+        _inv_freq_source = "rkv_metadata_inv_freq"
+    elif derived_inv_freq is not None:
+        _inv_freq_source = "derived_from_model_config"
+    else:
+        _inv_freq_source = "none"
 
     # Build TriAttention metadata
     metadata = {
@@ -259,6 +299,7 @@ def _convert_rkv_stats(
         "partial_rotary_factor": partial_rotary_factor,
         "rotary_dim": rotary_dim,
         "freq_count": freq_count,
+        "_inv_freq_source": _inv_freq_source,
         # Preserve original metadata
         "rkv_metadata": rkv_metadata,
     }
@@ -279,21 +320,32 @@ def _convert_rkv_stats(
         be repurposed as `freq_scale_sq`. We derive `freq_scale_sq` from the
         model's rotary embedding scaling (HF-aligned semantic source). If that
         derivation fails, fall back to ones to keep behavior explicit and safe.
+
+        Fallback order for the model source:
+        1. ``model_name`` / ``model_path`` stored inside the R-KV metadata.
+        2. The runtime ``model_path`` passed into ``load_frequency_stats`` /
+           ``_convert_rkv_stats`` (legacy Qwen3 stats carry no model info, but
+           the vLLM runtime knows the model path).
         """
+        model_candidates: list[Any] = []
         model_id = rkv_metadata.get("model_name", rkv_metadata.get("model_path"))
         if model_id:
+            model_candidates.append(model_id)
+        if model_path is not None:
+            model_candidates.append(str(model_path))
+        for candidate in model_candidates:
             try:
                 from transformers import AutoConfig
                 from triattention.common.rope_utils import build_rotary, compute_frequency_scaling
 
-                model_path = Path(str(model_id))
+                cand_path = Path(str(candidate))
                 model_config = AutoConfig.from_pretrained(
-                    str(model_id),
+                    str(candidate),
                     trust_remote_code=True,
                 )
                 rotary = build_rotary(
                     cache_device=device,
-                    model_path=model_path,
+                    model_path=cand_path,
                     dtype=dtype,
                     config=model_config,
                 )
@@ -306,7 +358,7 @@ def _convert_rkv_stats(
                 freq_scale_sq = freq_scale.pow(2)
                 return freq_scale_sq.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
             except Exception:
-                pass
+                continue
 
         # Explicit fallback when model-derived scaling is unavailable.
         return torch.ones(

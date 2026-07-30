@@ -99,3 +99,54 @@ def test_selector_falls_back_when_stats_freq_mismatches_runtime_kv(tmp_path):
     assert result["mode"] == "shared"
     assert result["semantic"] == "recency_fallback_stats_incompatible"
     assert result["indices"] == [4, 5, 6, 7]
+
+
+def test_legacy_qwen3_stats_full_rotary_geometry(tmp_path):
+    """Legacy Qwen3 R-KV stats carry no partial_rotary metadata.
+
+    The partial-rotary-aware build must treat them as full-rotary
+    (partial_rotary_factor=1.0, rotary_dim=head_dim, freq_count=head_dim//2)
+    so that scoring stays identical to the pre-Qwen3.5 build. Otherwise the
+    rotary geometry would be mis-resolved and accuracy would regress.
+    """
+    stats_path = tmp_path / "qwen3_legacy_stats.pt"
+    head_dim = 128
+    freq_count = head_dim // 2  # 64
+    stats = {}
+    # Mimic the real qwen3_32b_int4_stats.pt: layer00_head00..head03, no
+    # partial_rotary_factor / rotary_dim / freq_count / inv_freq metadata.
+    for layer_idx in (0, 1):
+        for head_idx in range(4):
+            stats[f"layer{layer_idx:02d}_head{head_idx:02d}"] = {
+                "q_mean_real": torch.ones(freq_count),
+                "q_mean_imag": torch.zeros(freq_count),
+                "q_abs_mean": torch.ones(freq_count),
+            }
+    torch.save(
+        {
+            "metadata": {
+                "head_dim": head_dim,
+                "rope_style": "half",
+                "rope_type": "default",
+                "sampled_heads": [[0, 0], [1, 0]],
+            },
+            "stats": stats,
+        },
+        stats_path,
+    )
+
+    metadata, head_stats = load_frequency_stats(
+        stats_path,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_kv_heads=4,
+    )
+
+    # Legacy full-rotary geometry must resolve to head_dim-level values.
+    assert metadata["partial_rotary_factor"] == 1.0
+    assert metadata["rotary_dim"] == head_dim
+    assert metadata["freq_count"] == freq_count
+    assert sorted(head_stats) == [0, 1]
+    assert head_stats[0]["freq_scale_sq"].shape == (4, freq_count)
+    assert head_stats[0]["q_mean_complex"].shape == (4, freq_count, 2)
+    assert head_stats[0]["q_abs_mean"].shape == (4, freq_count)
