@@ -549,9 +549,20 @@ def triattention_scoring(
     batch_size, num_heads, seq_len, head_dim = K_rot.shape
     freq_count = q_mean_real.shape[1]
 
-    # Validate inputs
+    # Validate inputs.
+    # Full-RoPE: head_dim == 2*freq_count.  Partial-RoPE: only the leading
+    # rotary_dim channels are rotated, so freq_count == rotary_dim // 2 <
+    # head_dim // 2.  The current Triton kernel layout math assumes full-RoPE
+    # ("half" pairing spans the entire head_dim), so partial-RoPE runs must go
+    # through the PyTorch scoring path instead.
     assert head_dim % 2 == 0, "head_dim must be even for complex pairing"
-    assert head_dim // 2 == freq_count, f"freq_count {freq_count} != head_dim//2 {head_dim//2}"
+    if head_dim // 2 != freq_count:
+        raise NotImplementedError(
+            "Partial-RoPE (freq_count < head_dim//2) is not supported by the "
+            "Triton scoring kernel. Set TRIATTN_RUNTIME_SCORING_BACKEND=torch "
+            "(or 'auto' on Ascend) to use the PyTorch scoring path which "
+            f"handles partial RoPE. head_dim={head_dim}, freq_count={freq_count}"
+        )
 
     # Allocate output
     scores = torch.empty(

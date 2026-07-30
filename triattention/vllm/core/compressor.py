@@ -98,9 +98,14 @@ class TriAttentionCompressor:
         if self.config.num_kv_heads is None:
             self.config.num_kv_heads = self.metadata["num_kv_heads"]
         if self.config.num_layers is None:
-            self.config.num_layers = self.metadata["num_layers"]
+            self.config.num_layers = self.metadata.get("num_layers")
         if "rope_style" in self.metadata:
             self.config.rope_style = str(self.metadata["rope_style"])
+        # Resolve partial-RoPE geometry (Qwen3.5-style partial_rotary_factor<1).
+        # Stats metadata may carry explicit rotary_dim/freq_count/partial_rotary_factor,
+        # or only an inv_freq whose length implies rotary_dim // 2. The resolved
+        # freq_count drives all scoring math from here on.
+        self._resolve_partial_rotary_geometry()
 
         # Initialize RoPE frequencies
         self._init_rope()
@@ -116,6 +121,58 @@ class TriAttentionCompressor:
 
         self._initialized = True
 
+    def _resolve_partial_rotary_geometry(self) -> None:
+        """Populate ``config.rotary_dim``/``freq_count``/``partial_rotary_factor``.
+
+        Priority for each field:
+        - ``rotary_dim``: explicit metadata > ``head_dim * partial_rotary_factor``
+          > inferred from ``inv_freq`` length > ``head_dim`` (full RoPE).
+        - ``freq_count``: explicit metadata > ``rotary_dim // 2``.
+        - ``partial_rotary_factor``: explicit metadata > ``rotary_dim / head_dim``
+          > 1.0 (full RoPE).
+
+        This mirrors the resolution used by the vLLM-Ascend 0.18.0 production
+        build so stats files are interchangeable across deployments.
+        """
+        md = self.metadata or {}
+        head_dim = int(self.config.head_dim or 0)
+
+        # partial_rotary_factor: prefer explicit metadata, then keep config default (1.0).
+        prf_raw = md.get("partial_rotary_factor")
+        if isinstance(prf_raw, (int, float)) and float(prf_raw) > 0:
+            self.config.partial_rotary_factor = float(prf_raw)
+
+        # rotary_dim: prefer explicit metadata, then head_dim * partial_rotary_factor,
+        # then infer from inv_freq length, then full head_dim.
+        if self.config.rotary_dim is None:
+            rotary_dim_raw = md.get("rotary_dim")
+            if isinstance(rotary_dim_raw, (int, float)) and int(rotary_dim_raw) > 0:
+                self.config.rotary_dim = int(rotary_dim_raw)
+            elif head_dim > 0 and 0.0 < float(self.config.partial_rotary_factor) <= 1.0:
+                self.config.rotary_dim = max(2, int(head_dim * float(self.config.partial_rotary_factor)))
+            else:
+                # Infer from inv_freq length if it implies a smaller rotary dim.
+                inv_freq_raw = md.get("inv_freq")
+                inv_freq_len = 0
+                if isinstance(inv_freq_raw, torch.Tensor):
+                    inv_freq_len = int(inv_freq_raw.numel())
+                elif isinstance(inv_freq_raw, (list, tuple)):
+                    inv_freq_len = len(inv_freq_raw)
+                if inv_freq_len > 0 and head_dim > 0 and inv_freq_len * 2 < head_dim:
+                    self.config.rotary_dim = inv_freq_len * 2
+                    if self.config.partial_rotary_factor == 1.0:
+                        self.config.partial_rotary_factor = (inv_freq_len * 2) / head_dim
+                elif head_dim > 0:
+                    self.config.rotary_dim = head_dim
+
+        # freq_count: prefer explicit metadata, then rotary_dim // 2.
+        if self.config.freq_count is None:
+            freq_count_raw = md.get("freq_count")
+            if isinstance(freq_count_raw, (int, float)) and int(freq_count_raw) > 0:
+                self.config.freq_count = int(freq_count_raw)
+            elif self.config.rotary_dim is not None and int(self.config.rotary_dim) > 0:
+                self.config.freq_count = int(self.config.rotary_dim) // 2
+
     def _init_rope(self):
         """Initialize RoPE frequencies from stats metadata.
 
@@ -123,32 +180,49 @@ class TriAttentionCompressor:
         1) metadata.inv_freq (if present) for model-exact rotary semantics;
         2) derive inv_freq from the real model config when model_path is available;
         3) fallback to metadata/legacy rope_theta-based construction.
+
+        The expected frequency count follows ``config.freq_count`` (resolved
+        from rotary_dim), so partial-RoPE models whose ``inv_freq`` only covers
+        the rotated channels are handled correctly.
         """
+        expected_freq_count = int(self.config.freq_count or 0)
         inv_freq_raw = self.metadata.get("inv_freq")
         if isinstance(inv_freq_raw, torch.Tensor):
             inv_freq = inv_freq_raw.to(device=self.config.device, dtype=torch.float32)
-            expected_freq_count = int(self.config.head_dim) // 2
-            if inv_freq.numel() < expected_freq_count:
+            if 0 < expected_freq_count and inv_freq.numel() < expected_freq_count:
                 raise ValueError(
                     "metadata.inv_freq has fewer elements than required by "
-                    f"head_dim={self.config.head_dim}: got {inv_freq.numel()}, "
+                    f"rotary_dim={self.config.rotary_dim} "
+                    f"(head_dim={self.config.head_dim}, "
+                    f"partial_rotary_factor={self.config.partial_rotary_factor}): "
+                    f"got {inv_freq.numel()}, "
                     f"expected at least {expected_freq_count}"
                 )
-            self.inv_freq = inv_freq[:expected_freq_count].contiguous()
+            self.inv_freq = (
+                inv_freq[:expected_freq_count].contiguous()
+                if expected_freq_count > 0
+                else inv_freq.contiguous()
+            )
         elif isinstance(inv_freq_raw, (list, tuple)):
             inv_freq = torch.tensor(
                 inv_freq_raw,
                 device=self.config.device,
                 dtype=torch.float32,
             )
-            expected_freq_count = int(self.config.head_dim) // 2
-            if inv_freq.numel() < expected_freq_count:
+            if 0 < expected_freq_count and inv_freq.numel() < expected_freq_count:
                 raise ValueError(
                     "metadata.inv_freq has fewer elements than required by "
-                    f"head_dim={self.config.head_dim}: got {inv_freq.numel()}, "
+                    f"rotary_dim={self.config.rotary_dim} "
+                    f"(head_dim={self.config.head_dim}, "
+                    f"partial_rotary_factor={self.config.partial_rotary_factor}): "
+                    f"got {inv_freq.numel()}, "
                     f"expected at least {expected_freq_count}"
                 )
-            self.inv_freq = inv_freq[:expected_freq_count].contiguous()
+            self.inv_freq = (
+                inv_freq[:expected_freq_count].contiguous()
+                if expected_freq_count > 0
+                else inv_freq.contiguous()
+            )
         else:
             derived_inv_freq: torch.Tensor | None = None
             model_path = getattr(self.config, "model_path", None)
@@ -170,10 +244,15 @@ class TriAttentionCompressor:
                     )
                     inv_freq = getattr(rotary, "inv_freq", None)
                     if isinstance(inv_freq, torch.Tensor):
+                        slice_count = (
+                            expected_freq_count
+                            if expected_freq_count > 0
+                            else int(inv_freq.numel())
+                        )
                         derived_inv_freq = inv_freq.to(
                             device=self.config.device,
                             dtype=torch.float32,
-                        )[: int(self.config.head_dim) // 2].contiguous()
+                        )[:slice_count].contiguous()
                         self.config.rope_style = str(
                             getattr(rotary, "_rope_style", self.config.rope_style)
                         )
@@ -184,8 +263,16 @@ class TriAttentionCompressor:
                 self.inv_freq = derived_inv_freq
             else:
                 rope_theta = self.metadata.get("rope_theta", 10000.0)
+                # For partial-RoPE fallback, compute frequencies over the
+                # rotated dim rather than the full head_dim so omega matches
+                # the stats freq_count.
+                freq_head_dim = (
+                    int(self.config.rotary_dim)
+                    if int(self.config.rotary_dim or 0) > 0
+                    else int(self.config.head_dim)
+                )
                 self.inv_freq = compute_rope_frequencies(
-                    self.config.head_dim,
+                    freq_head_dim,
                     rope_theta=rope_theta,
                     device=self.config.device,
                 )
@@ -198,10 +285,32 @@ class TriAttentionCompressor:
 
         This extracts freq_scale_sq from head_stats for efficient scoring.
         Shape: [num_layers, num_kv_heads, freq_count]
+
+        ``freq_count`` follows the resolved partial-RoPE geometry so partial-RoPE
+        models only allocate/store frequency scales for the rotated channels.
         """
         num_layers = self.config.num_layers
         num_kv_heads = self.config.num_kv_heads
-        freq_count = self.config.head_dim // 2
+        freq_count = int(self.config.freq_count or 0)
+        # Guard against incomplete metadata (e.g. R-KV stats where num_layers
+        # was not recorded).  Fall back to head_stats-derived counts so we do
+        # not allocate a zero-row tensor that breaks later indexing.
+        if not num_layers:
+            if self.head_stats:
+                num_layers = max(int(idx) for idx in self.head_stats) + 1
+            else:
+                num_layers = 0
+        if not num_kv_heads:
+            num_kv_heads = 0
+        if freq_count <= 0 or num_layers <= 0 or num_kv_heads <= 0:
+            self.freq_scale_sq = torch.zeros(
+                max(0, num_layers),
+                max(0, num_kv_heads),
+                max(0, freq_count),
+                device=self.config.device,
+                dtype=self.config.compute_dtype,
+            )
+            return
 
         # Allocate freq_scale_sq tensor
         self.freq_scale_sq = torch.zeros(

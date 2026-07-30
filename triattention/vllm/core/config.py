@@ -112,6 +112,23 @@ class TriAttentionConfig:
     rope_style: Literal["half", "interleaved"] = "half"
     """RoPE frequency pairing style (detected from model)."""
 
+    partial_rotary_factor: float = 1.0
+    """Fraction of head_dim that is rotated by RoPE.
+
+    Models like Qwen3.5 use partial_rotary_factor=0.25, meaning only 25% of
+    head_dim channels are rotated. The non-rotary tail carries no position
+    information and must be excluded from frequency-domain scoring.
+    """
+
+    rotary_dim: Optional[int] = None
+    """Number of rotated dimensions within head_dim.
+    None => head_dim * partial_rotary_factor. Must be even."""
+
+    freq_count: Optional[int] = None
+    """Number of complex frequency pairs = rotary_dim // 2.
+    None => rotary_dim // 2. This is the actual freq dimension used in scoring,
+    NOT head_dim // 2 when partial_rotary_factor < 1.0."""
+
     head_dim: Optional[int] = None
     """Head dimension (auto-detected from model if not specified)."""
 
@@ -198,6 +215,9 @@ class TriAttentionConfig:
             "trig_cache_max_seq_len": self.trig_cache_max_seq_len,
             "trig_cache_warn_threshold_mb": self.trig_cache_warn_threshold_mb,
             "rope_style": self.rope_style,
+            "partial_rotary_factor": self.partial_rotary_factor,
+            "rotary_dim": self.rotary_dim,
+            "freq_count": self.freq_count,
             "head_dim": self.head_dim,
             "num_kv_heads": self.num_kv_heads,
             "num_layers": self.num_layers,

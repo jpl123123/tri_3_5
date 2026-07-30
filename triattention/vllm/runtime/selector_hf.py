@@ -386,7 +386,15 @@ def build_triattention_selector(
         raise RuntimeError(f"unsupported_kv_cache_rank:{key_tensor.ndim}")
 
     def _runtime_freq_count_from_head_dim(head_dim: int) -> int:
-        return max(0, int(head_dim) // 2)
+        # For partial rotary models (e.g. Qwen3.5), freq_count != head_dim // 2.
+        # Use the resolved partial_rotary_factor from tri_cfg (which comes from
+        # stats metadata) to derive the expected runtime freq_count from the
+        # runtime KV cache's head_dim. This correctly detects genuine stats-vs-
+        # runtime mismatches (different head_dim or different partial_rotary)
+        # while not falsely flagging partial-rotary models as mismatched.
+        partial_factor = float(getattr(tri_cfg, "partial_rotary_factor", 1.0) or 1.0)
+        rotary_dim = int(int(head_dim) * partial_factor)
+        return max(0, rotary_dim // 2)
 
     def _runtime_freq_count_from_kv_cache(kv_cache: Any) -> int:
         return _runtime_freq_count_from_head_dim(_kv_cache_head_dim(kv_cache))

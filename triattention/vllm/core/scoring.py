@@ -253,7 +253,22 @@ def compute_scores_pytorch(
         Importance scores [batch, num_kv_heads, seq_len] or [batch, seq_len]
     """
     batch_size, num_kv_heads, seq_len, head_dim = key_states.shape
-    freq_count = head_dim // 2
+    # Resolve rotary geometry: partial rotary models (e.g. Qwen3.5 with
+    # partial_rotary_factor=0.25) only rotate a prefix of head_dim. The scoring
+    # formula's complex pairing and phase terms apply to the rotary portion only;
+    # the non-rotary tail has no position information and must be excluded.
+    rotary_dim = (
+        int(config.rotary_dim)
+        if getattr(config, "rotary_dim", None) is not None
+        else head_dim
+    )
+    if rotary_dim <= 0 or rotary_dim > head_dim:
+        rotary_dim = head_dim
+    freq_count = (
+        int(config.freq_count)
+        if getattr(config, "freq_count", None) is not None
+        else rotary_dim // 2
+    )
     score_device = key_states.device
 
     # Match the Triton kernel's numerical contract: K, Q statistics, RoPE
@@ -286,16 +301,21 @@ def compute_scores_pytorch(
         # If not provided, assume it equals q_mean_abs (no MLR effect)
         q_abs_mean = q_mean_abs
 
-    # Convert K to complex representation according to the configured RoPE layout.
-    # Qwen-family models use "half" layout: [r0, r1, ..., i0, i1, ...].
+    # Convert the ROTATED portion of K to complex representation according to
+    # the configured RoPE layout.  Qwen-family models use "half" layout:
+    # [r0, r1, ..., i0, i1, ...] over the rotated channels only.  For partial
+    # RoPE, the trailing (head_dim - rotary_dim) channels are never rotated
+    # and are excluded from scoring.
     if config.rope_style == "interleaved":
-        k_pairs = key_states.reshape(batch_size, num_kv_heads, seq_len, freq_count, 2)
+        # Interleaved pairing within the rotated prefix: [r0,i0,r1,i1,...].
+        k_rotary = key_states[..., :rotary_dim]
+        k_pairs = k_rotary.reshape(batch_size, num_kv_heads, seq_len, freq_count, 2)
         k_real = k_pairs[..., 0]
         k_imag = k_pairs[..., 1]
     else:
-        half_dim = head_dim // 2
-        k_real = key_states[..., :half_dim]
-        k_imag = key_states[..., half_dim:]
+        half_rotary = rotary_dim // 2  # == freq_count
+        k_real = key_states[..., :half_rotary]
+        k_imag = key_states[..., half_rotary:rotary_dim]
     k_abs = torch.sqrt(k_real ** 2 + k_imag ** 2)  # [batch, num_kv_heads, seq_len, freq_count]
 
     # Compute Q * conj(K_rot) directly. This is the mathematically equivalent
