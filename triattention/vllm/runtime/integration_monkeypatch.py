@@ -753,6 +753,12 @@ def install_vllm_integration_monkeypatches(
             TriAttentionScheduler._sync_effective_kv_offsets_before_schedule
         )
         Scheduler._apply_compression_events = TriAttentionScheduler._apply_compression_events
+        # Per-group block size resolver used by _apply_compression_events on
+        # multi-KV-cache-group hybrid/MTP models (vLLM-Ascend v0.23.0+ where
+        # scheduler self.block_size is the LCM of group block sizes).
+        Scheduler._resolve_group_block_sizes = (
+            TriAttentionScheduler._resolve_group_block_sizes
+        )
         _ORIG_KVCACHE_ALLOCATE_SLOTS = KVCacheManager.allocate_slots
         KVCacheManager.allocate_slots = _patched_kv_cache_allocate_slots
         _ORIG_ENGINE_CORE_STEP_WITH_BATCH_QUEUE = EngineCore.step_with_batch_queue
