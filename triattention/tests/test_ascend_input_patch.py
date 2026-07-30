@@ -50,6 +50,36 @@ class _V1BlockTable:
         self.commit_calls.append(total_num_scheduled_tokens)
 
 
+class _V1BlockTableV023:
+    """Mock BlockTable that mimics the vLLM-Ascend v0.23.0 GPU API.
+
+    v0.23.0 changed ``compute_slot_mapping`` to
+    ``(num_reqs, query_start_loc, positions)`` (all GPU tensors) and removed
+    ``commit_slot_mapping``; the kernel writes ``slot_mapping.gpu`` directly.
+    """
+
+    def __init__(self, *, block_size=128, num_blocks_per_row=(4,)):
+        self.block_size = block_size
+        self.num_blocks_per_row = np.array(num_blocks_per_row, dtype=np.int32)
+        # Records (num_reqs, qsl_cpu_list, positions_cpu_list) for assertions.
+        self.compute_calls: list = []
+
+    def compute_slot_mapping(self, num_reqs, query_start_loc, positions):
+        self.compute_calls.append((
+            int(num_reqs),
+            query_start_loc.detach().cpu().numpy().tolist(),
+            positions.detach().cpu().numpy().tolist(),
+        ))
+
+
+class _GpuBufferMock:
+    """Minimal CpuGpuBuffer mock (``.np`` / ``.gpu``) used for query_start_loc."""
+
+    def __init__(self, np_array, gpu_tensor):
+        self.np = np_array
+        self.gpu = gpu_tensor
+
+
 def test_ascend_v2_seq_override_updates_seq_lens_np():
     def _original(self, scheduler_output, req_ids):
         del scheduler_output
@@ -625,3 +655,267 @@ def test_v1_prepare_inputs_ignores_positive_pos_delta_in_mixed_batch():
     assert block_table.compute_calls == []
     assert block_table.commit_calls == []
     assert runner.seq_lens.np[4] == 4088
+
+
+# ---------------------------------------------------------------------------
+# vLLM-Ascend v0.23.0 compatibility tests
+#
+# In v0.23.0 ``self.positions`` and ``self.seq_lens`` became plain GPU
+# ``torch.Tensor`` objects (no ``.np`` attribute) and ``BlockTable`` switched
+# to the GPU ``compute_slot_mapping(num_reqs, query_start_loc, positions)``
+# signature without ``commit_slot_mapping``. These tests exercise the
+# compatibility layer added in ``input_patch_vllm_v1_backend.py``.
+# ---------------------------------------------------------------------------
+
+
+def _build_v023_runner(*, num_reqs, num_computed_tokens, positions_np,
+                      seq_lens_np, block_table, query_start_loc_np=None):
+    """Build a SimpleNamespace runner that mimics the v0.23.0 layout.
+
+    - ``positions`` is a plain GPU torch.Tensor (no ``.np``).
+    - ``_positions_np_buf`` is the CPU numpy mirror.
+    - ``seq_lens`` is a plain CPU/GPU torch.Tensor (no ``.np``).
+    - ``optimistic_seq_lens_cpu`` is the CPU torch.Tensor mirror.
+    - ``query_start_loc`` is a CpuGpuBuffer-like mock with ``.gpu``.
+    """
+    device = torch.device("cpu")  # tests run without a real NPU
+    positions_gpu = torch.from_numpy(positions_np.astype(np.int64)).to(device)
+    seq_lens_t = torch.from_numpy(seq_lens_np.astype(np.int32)).to(device)
+    optimistic = torch.from_numpy(seq_lens_np.astype(np.int32)).to(device)
+
+    if query_start_loc_np is None:
+        query_start_loc_np = np.zeros(num_reqs + 1, dtype=np.int64)
+    qsl_gpu = torch.from_numpy(query_start_loc_np.astype(np.int64)).to(device)
+
+    return SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_reqs=num_reqs,
+            num_computed_tokens_cpu=np.array(num_computed_tokens, dtype=np.int32),
+            block_table=block_table,
+        ),
+        arange_np=np.arange(max(num_reqs, 1), dtype=np.int32),
+        positions=positions_gpu,
+        _positions_np_buf=positions_np.astype(np.int64),
+        seq_lens=seq_lens_t,
+        optimistic_seq_lens_cpu=optimistic,
+        query_start_loc=_GpuBufferMock(query_start_loc_np, qsl_gpu),
+        device=device,
+    )
+
+
+def test_v023_prepare_inputs_applies_seq_and_slot_overrides_via_gpu_api():
+    """v0.23.0 path: seq_lens and slot mapping are updated through the new GPU API."""
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTableV023(block_size=128, num_blocks_per_row=(4,))
+    positions_np = np.array([4096], dtype=np.int64)
+    runner = _build_v023_runner(
+        num_reqs=1,
+        num_computed_tokens=[4096],
+        positions_np=positions_np,
+        seq_lens_np=np.array([4097, 0], dtype=np.int32),
+        block_table=block_table,
+        query_start_loc_np=np.array([0, 1], dtype=np.int64),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    # seq_lens was overridden to effective_base + num_scheduled_tokens = 385.
+    assert runner.seq_lens.cpu().tolist()[0] == 385
+    assert runner.optimistic_seq_lens_cpu.tolist()[0] == 385
+    # The new GPU compute_slot_mapping API was invoked (no commit_slot_mapping).
+    assert len(block_table.compute_calls) == 1
+    num_reqs, qsl, pos = block_table.compute_calls[0]
+    assert num_reqs == 1
+    assert qsl == [0, 1]
+    assert pos == [384]
+    # No commit_calls attribute on the v0.23 mock (commit_slot_mapping removed).
+    assert not hasattr(block_table, "commit_calls")
+
+
+def test_v023_prepare_inputs_skips_slot_mapping_when_no_override():
+    """v0.23.0 path: without a pos override, compute_slot_mapping is not called."""
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTableV023(block_size=128, num_blocks_per_row=(4,))
+    positions_np = np.array([4096], dtype=np.int64)
+    runner = _build_v023_runner(
+        num_reqs=1,
+        num_computed_tokens=[4096],
+        positions_np=positions_np,
+        seq_lens_np=np.array([4097, 0], dtype=np.int32),
+        block_table=block_table,
+        query_start_loc_np=np.array([0, 1], dtype=np.int64),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    # Only seq base override, no pos delta -> slot positions unchanged.
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx=None,
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    # seq override applied (384 + 1 = 385), but no slot remap (single req,
+    # effective base 384 < positions[0]=4096 so _build_effective_slot_positions
+    # does produce a remapped position to 384 -> compute_slot_mapping called).
+    assert runner.seq_lens.cpu().tolist()[0] == 385
+    # single-req path with effective_base=384 yields slot position [384].
+    assert len(block_table.compute_calls) == 1
+    _, _, pos = block_table.compute_calls[0]
+    assert pos == [384]
+
+
+def test_v023_prepare_inputs_handles_multi_request_batch():
+    """v0.23.0 path: multi-request batch query_start_loc and positions mapping."""
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTableV023(block_size=128, num_blocks_per_row=(4, 4))
+    positions_np = np.array([1024, 4096], dtype=np.int64)
+    runner = _build_v023_runner(
+        num_reqs=2,
+        num_computed_tokens=[1024, 4096],
+        positions_np=positions_np,
+        seq_lens_np=np.array([1025, 4097, 0], dtype=np.int32),
+        block_table=block_table,
+        # Two requests each with 1 scheduled token -> [0, 1, 2].
+        query_start_loc_np=np.array([0, 1, 2], dtype=np.int64),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=2)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={1: 384},
+        effective_pos_delta_by_req_idx={1: -3712},
+        expected_req_row_indices=(1,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1, 1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    # req 0 unchanged (1025), req 1 overridden to 385.
+    seq_list = runner.seq_lens.cpu().tolist()
+    assert seq_list[0] == 1025
+    assert seq_list[1] == 385
+    # Slot mapping invoked once with both tokens; req 1 position remapped to 384.
+    assert len(block_table.compute_calls) == 1
+    num_reqs, qsl, pos = block_table.compute_calls[0]
+    assert num_reqs == 2
+    assert qsl == [0, 1, 2]
+    assert pos == [1024, 384]
+
+
+def test_v023_prepare_inputs_falls_back_to_qsl_reconstruction_when_missing():
+    """v0.23.0 path: when query_start_loc lacks ``.gpu``, it is reconstructed."""
+    def _original_prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        del self, scheduler_output, num_scheduled_tokens
+        return object()
+
+    block_table = _V1BlockTableV023(block_size=128, num_blocks_per_row=(4,))
+    positions_np = np.array([4096], dtype=np.int64)
+    runner = _build_v023_runner(
+        num_reqs=1,
+        num_computed_tokens=[4096],
+        positions_np=positions_np,
+        seq_lens_np=np.array([4097, 0], dtype=np.int32),
+        block_table=block_table,
+        query_start_loc_np=np.array([0, 1], dtype=np.int64),
+    )
+    # Remove the ``.gpu`` attribute to force the reconstruction fallback.
+    runner.query_start_loc = None
+
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+    input_patch_state.set_active_effective_overrides_enabled(True)
+    input_patch_state.set_active_effective_sparse_overrides(
+        effective_base_by_req_idx={0: 384},
+        effective_pos_delta_by_req_idx={0: -3712},
+        expected_req_row_indices=(0,),
+        expected_query_lens=(1,),
+    )
+
+    try:
+        patched = make_patched_v1_prepare_inputs(_original_prepare_inputs)
+        patched(runner, scheduler_output, np.array([1], dtype=np.int32))
+    finally:
+        input_patch_state.set_active_effective_overrides_enabled(False)
+        input_patch_state.set_active_effective_sparse_overrides(
+            effective_base_by_req_idx=None,
+            effective_pos_delta_by_req_idx=None,
+        )
+
+    # The reconstruction fallback builds [0, 1] from req_indices.
+    assert len(block_table.compute_calls) == 1
+    num_reqs, qsl, pos = block_table.compute_calls[0]
+    assert num_reqs == 1
+    assert qsl == [0, 1]
+    assert pos == [384]
+
+
+def test_v023_helpers_extract_numpy_from_plain_tensors():
+    """Unit test the version-tolerant buffer accessors directly."""
+    from triattention.vllm.runtime.input_patch_vllm_v1_backend import (
+        _runner_positions_np,
+        _runner_seq_lens_np,
+    )
+
+    # Plain tensor layout (v0.23.0): positions is a GPU-like tensor with
+    # ``_positions_np_buf`` mirror; seq_lens is plain tensor with
+    # ``optimistic_seq_lens_cpu`` mirror.
+    positions_buf = np.array([10, 20, 30], dtype=np.int64)
+    runner = SimpleNamespace(
+        positions=torch.zeros(3, dtype=torch.int64),
+        _positions_np_buf=positions_buf,
+        seq_lens=torch.zeros(3, dtype=torch.int32),
+        optimistic_seq_lens_cpu=torch.tensor([100, 200, 0], dtype=torch.int32),
+    )
+    np.testing.assert_array_equal(_runner_positions_np(runner, 3), [10, 20, 30])
+    np.testing.assert_array_equal(_runner_seq_lens_np(runner), [100, 200, 0])
+
+    # Legacy CpuGpuBuffer layout (v0.18.0): objects expose ``.np``.
+    runner_legacy = SimpleNamespace(
+        positions=SimpleNamespace(np=np.array([1, 2], dtype=np.int64)),
+        seq_lens=SimpleNamespace(np=np.array([7, 8], dtype=np.int32)),
+    )
+    np.testing.assert_array_equal(_runner_positions_np(runner_legacy, 2), [1, 2])
+    np.testing.assert_array_equal(_runner_seq_lens_np(runner_legacy), [7, 8])
+

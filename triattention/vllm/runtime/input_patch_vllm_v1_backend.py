@@ -583,6 +583,158 @@ def _record_active_effective_max_seq_len(
     return max_seq_len
 
 
+# ---------------------------------------------------------------------------
+# vLLM-Ascend version-tolerant buffer accessors
+#
+# Between vLLM-Ascend v0.18.0 and v0.23.0 the NPUModelRunner changed two key
+# attributes from CpuGpuBuffer objects (which expose ``.np``/``.cpu``/``.gpu``
+# plus ``copy_to_gpu``) to plain ``torch.Tensor`` allocations:
+#
+#   * ``self.positions``: was ``CpuGpuBuffer`` (use ``.np``) -> plain GPU
+#     tensor with a sibling CPU numpy buffer ``self._positions_np_buf``.
+#   * ``self.seq_lens``: was ``CpuGpuBuffer`` (use ``.np``/``copy_to_gpu``)
+#     -> plain GPU tensor whose CPU mirror is
+#     ``self.optimistic_seq_lens_cpu`` (a CPU ``torch.Tensor``).
+#
+# ``query_start_loc`` / ``query_pos`` / ``input_ids`` stayed as CpuGpuBuffer.
+#
+# At the same time ``BlockTable.compute_slot_mapping`` changed signature:
+#
+#   * v0.18.0: ``compute_slot_mapping(req_indices: np.ndarray,
+#       positions: np.ndarray)`` computed on CPU into ``slot_mapping.np`` and
+#       required a follow-up ``commit_slot_mapping(num_tokens)`` to push it to
+#       the GPU.
+#   * v0.23.0: ``compute_slot_mapping(num_reqs: int, query_start_loc:
+#       torch.Tensor, positions: torch.Tensor)`` runs a Triton kernel on GPU
+#       and writes ``slot_mapping.gpu`` directly; ``commit_slot_mapping`` was
+#       removed.
+#
+# The helpers below let the patched ``_prepare_inputs`` run on both layouts
+# without knowing which vLLM-Ascend version is installed.
+# ---------------------------------------------------------------------------
+
+
+def _runner_positions_np(runner: Any, total: int) -> np.ndarray:
+    """Return a CPU numpy view of the runner's positions buffer.
+
+    Handles both the legacy CpuGpuBuffer (``.np``) layout used by
+    vLLM-Ascend <= v0.18.0 and the plain GPU tensor layout used by
+    vLLM-Ascend >= v0.23.0 (where the CPU mirror lives in
+    ``runner._positions_np_buf``).
+    """
+    positions = getattr(runner, "positions", None)
+    np_attr = getattr(positions, "np", None)
+    if np_attr is not None:
+        return np_attr[:total]
+    positions_np_buf = getattr(runner, "_positions_np_buf", None)
+    if positions_np_buf is not None:
+        return positions_np_buf[:total]
+    # Last-resort fallback: copy the (GPU) tensor to CPU.
+    if isinstance(positions, torch.Tensor):
+        return positions[:total].detach().cpu().numpy()
+    raise RuntimeError(
+        "TRIATTN_V1_POSITIONS_BUFFER_UNSUPPORTED:"
+        "cannot read positions numpy view from runner"
+    )
+
+
+def _runner_seq_lens_np(runner: Any) -> np.ndarray:
+    """Return a CPU numpy view of the runner's seq_lens buffer.
+
+    Handles both the legacy CpuGpuBuffer layout (``.np``) and the plain GPU
+    tensor layout where the CPU mirror is ``runner.optimistic_seq_lens_cpu``
+    (a CPU ``torch.Tensor`` exposed via ``.numpy()``).
+    """
+    seq_lens = getattr(runner, "seq_lens", None)
+    np_attr = getattr(seq_lens, "np", None)
+    if np_attr is not None:
+        return np_attr
+    optimistic = getattr(runner, "optimistic_seq_lens_cpu", None)
+    if isinstance(optimistic, torch.Tensor):
+        return optimistic.numpy()
+    if isinstance(optimistic, np.ndarray):
+        return optimistic
+    if isinstance(seq_lens, torch.Tensor):
+        return seq_lens.detach().cpu().numpy()
+    raise RuntimeError(
+        "TRIATTN_V1_SEQ_LENS_BUFFER_UNSUPPORTED:"
+        "cannot read seq_lens numpy view from runner"
+    )
+
+
+def _runner_device(runner: Any) -> Any:
+    """Best-effort retrieval of the runner's torch device (fallback to NPU)."""
+    device = getattr(runner, "device", None)
+    if isinstance(device, torch.device):
+        return device
+    if isinstance(device, str):
+        return torch.device(device)
+    return torch.device("npu")
+
+
+def _apply_v1_effective_slot_mapping(
+    *,
+    runner: Any,
+    block_table: Any,
+    req_indices_np: np.ndarray,
+    slot_positions_np: np.ndarray,
+    num_reqs: int,
+    total_num_scheduled_tokens: int,
+) -> bool:
+    """Recompute ``slot_mapping`` for the effective (compressed) positions.
+
+    Dispatches to the BlockTable API variant that is actually installed:
+
+    * Legacy (v0.18.0 and earlier): ``compute_slot_mapping(req_indices,
+      positions)`` with numpy arrays followed by ``commit_slot_mapping(total)``.
+    * New (v0.23.0 and later): ``compute_slot_mapping(num_reqs,
+      query_start_loc, positions)`` running a GPU Triton kernel. The effective
+      positions are uploaded to a GPU tensor and the existing
+      ``runner.query_start_loc`` (already populated by the original
+      ``_prepare_inputs``) is reused as the request boundary descriptor.
+    """
+    if block_table is None:
+        return False
+
+    has_commit = callable(getattr(block_table, "commit_slot_mapping", None))
+
+    if has_commit:
+        # Legacy CPU/numpy path: compute on CPU then push to GPU.
+        block_table.compute_slot_mapping(req_indices_np, slot_positions_np)
+        block_table.commit_slot_mapping(int(total_num_scheduled_tokens))
+        return True
+
+    # New GPU path: build GPU tensors and invoke the Triton kernel variant.
+    device = _runner_device(runner)
+    positions_gpu = torch.as_tensor(
+        slot_positions_np,
+        device=device,
+        dtype=torch.int64,
+    )
+
+    query_start_loc = getattr(runner, "query_start_loc", None)
+    qsl_gpu_attr = getattr(query_start_loc, "gpu", None)
+    if qsl_gpu_attr is not None:
+        # CpuGpuBuffer: slice the GPU side.
+        query_start_loc_gpu = qsl_gpu_attr[: num_reqs + 1]
+    elif isinstance(query_start_loc, torch.Tensor):
+        query_start_loc_gpu = query_start_loc[: num_reqs + 1]
+    else:
+        # Reconstruct query_start_loc from num_scheduled_tokens as a fallback.
+        # This mirrors what NPUModelRunner._prepare_inputs does on the CPU side
+        # (cumsum of num_scheduled_tokens into query_start_loc[1:num_reqs+1]).
+        cu = np.zeros(int(num_reqs) + 1, dtype=np.int64)
+        if int(num_reqs) > 0:
+            # req_indices_np is flattened [req_id per token]; derive per-req counts.
+            counts = np.bincount(req_indices_np.astype(np.int64, copy=False),
+                                 minlength=int(num_reqs)).astype(np.int64)
+            cu[1:] = np.cumsum(counts)
+        query_start_loc_gpu = torch.as_tensor(cu, device=device, dtype=torch.int64)
+
+    block_table.compute_slot_mapping(int(num_reqs), query_start_loc_gpu, positions_gpu)
+    return True
+
+
 def make_patched_v1_prepare_inputs(
     original_prepare_inputs: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -610,7 +762,12 @@ def make_patched_v1_prepare_inputs(
                 return out
 
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            positions_np = self.positions.np[:total_num_scheduled_tokens]
+            positions_np = _runner_positions_np(self, total_num_scheduled_tokens)
+            # CPU numpy view of seq_lens. On legacy vLLM-Ascend this is
+            # ``seq_lens.np`` (CpuGpuBuffer); on v0.23.0+ it is the numpy view
+            # of ``optimistic_seq_lens_cpu``. In-place writes below are visible
+            # to ``_sync_v1_seq_lens_to_runner_buffers`` in both cases.
+            seq_lens_np = _runner_seq_lens_np(self)
             _validate_expected_v1_batch_mapping(
                 req_indices=req_indices,
                 num_scheduled_tokens=num_scheduled_tokens,
@@ -626,32 +783,38 @@ def make_patched_v1_prepare_inputs(
             if slot_positions_np is not None:
                 _validate_v1_block_table_bounds(
                     block_table=self.input_batch.block_table,
-                    seq_lens_np=self.seq_lens.np,
+                    seq_lens_np=seq_lens_np,
                     req_indices=req_indices,
                     slot_positions_np=slot_positions_np,
                     num_reqs=num_reqs,
                     validate_seq_lens=False,
                     input_batch=self.input_batch,
                 )
-                self.input_batch.block_table.compute_slot_mapping(req_indices, slot_positions_np)
-                self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+                _apply_v1_effective_slot_mapping(
+                    runner=self,
+                    block_table=self.input_batch.block_table,
+                    req_indices_np=req_indices,
+                    slot_positions_np=slot_positions_np,
+                    num_reqs=num_reqs,
+                    total_num_scheduled_tokens=total_num_scheduled_tokens,
+                )
                 slot_applied = True
             seq_applied = _apply_sparse_seq_len_overrides_in_place(
-                seq_lens_np=self.seq_lens.np,
+                seq_lens_np=seq_lens_np,
                 num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_reqs=num_reqs,
                 input_batch=self.input_batch,
             )
             if seq_applied:
-                self.seq_lens.np[num_reqs:].fill(0)
+                seq_lens_np[num_reqs:].fill(0)
                 _sync_v1_seq_lens_to_runner_buffers(
                     runner=self,
-                    seq_lens_np=self.seq_lens.np,
+                    seq_lens_np=seq_lens_np,
                     num_reqs=num_reqs,
                 )
                 effective_max_seq_len = _record_active_effective_max_seq_len(
-                    seq_lens_np=self.seq_lens.np,
+                    seq_lens_np=seq_lens_np,
                     num_reqs=num_reqs,
                 )
             else:
@@ -660,7 +823,7 @@ def make_patched_v1_prepare_inputs(
             if seq_applied:
                 _validate_v1_block_table_bounds(
                     block_table=self.input_batch.block_table,
-                    seq_lens_np=self.seq_lens.np,
+                    seq_lens_np=seq_lens_np,
                     req_indices=req_indices,
                     slot_positions_np=None,
                     num_reqs=num_reqs,
