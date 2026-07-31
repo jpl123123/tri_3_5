@@ -213,7 +213,7 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
     compression_events = _read_triattention_events_from_kv_cache_events(
         model_runner_output,
     )
-    source = "kv_connector_output.kv_cache_events" if compression_events else None
+    source = "kv_connector_output.triattention_compression_events" if compression_events else None
     if not compression_events:
         compression_events = getattr(
             model_runner_output,
@@ -714,6 +714,24 @@ def install_vllm_integration_monkeypatches(
         _PATCHED_SCHEDULER_ACTIVE = _PATCHED_SCHEDULER_ACTIVE or bool(patch_scheduler)
         _PATCHED_WORKER_ACTIVE = _PATCHED_WORKER_ACTIVE or bool(patch_worker)
         return
+
+    # Apply the vLLM KVConnectorOutput / KVOutputAggregator output patches
+    # before any scheduler/worker patching.  The patched
+    # ``Scheduler.update_from_output`` reads ``triattention_compression_events``
+    # from the aggregated ``KVConnectorOutput``, so the field and its
+    # aggregation logic must be in place first.  This ports the former
+    # hand-edits to the installed vLLM tree (see ``vllm-git-diff.txt``) into a
+    # runtime patch so the vLLM install no longer needs manual modification.
+    try:
+        from .vllm_output_patch import install_vllm_output_patches
+
+        install_vllm_output_patches()
+    except Exception:
+        logger.warning(
+            "[TriAttention] Failed to install vLLM output patches "
+            "(triattention_compression_events field / aggregator / marker).",
+            exc_info=True,
+        )
 
     import vllm.v1.core.sched.scheduler as sched_mod
     import vllm.v1.core.kv_cache_manager as kv_cache_manager_mod

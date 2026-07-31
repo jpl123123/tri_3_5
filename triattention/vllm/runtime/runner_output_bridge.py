@@ -317,7 +317,23 @@ def _attach_triattention_events_via_kv_cache_events(
 
             kco = KVConnectorOutput()
             setattr(target, "kv_connector_output", kco)
-        kco.kv_cache_events = _TriattentionEventBag(pending_events)
+        # Use the TriAttention-declared field (added at runtime by
+        # ``vllm_output_patch``) so we never collide with native
+        # ``kv_cache_events``.  Accumulate when the field already carries
+        # events from a prior attach in the same step.
+        existing = getattr(kco, "triattention_compression_events", None)
+        if existing is not None:
+            existing_events = getattr(existing, "events", None)
+            if isinstance(existing_events, list):
+                existing_events.extend(pending_events)
+            else:
+                kco.triattention_compression_events = _TriattentionEventBag(
+                    pending_events
+                )
+        else:
+            kco.triattention_compression_events = _TriattentionEventBag(
+                pending_events
+            )
         return True
     except Exception:
         return False
@@ -330,7 +346,7 @@ def _read_triattention_events_from_kv_cache_events(
     kco = getattr(model_runner_output, "kv_connector_output", None)
     if kco is None:
         return None
-    bag = getattr(kco, "kv_cache_events", None)
+    bag = getattr(kco, "triattention_compression_events", None)
     if bag is None:
         return None
     events = getattr(bag, "events", None)
