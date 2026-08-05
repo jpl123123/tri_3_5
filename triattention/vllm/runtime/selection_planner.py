@@ -483,12 +483,12 @@ def prepare_group_layer_compactions(
                 int(gid),
                 layer_idx,
                 int(group_total_tokens),
-                int(getattr(config, "kv_budget", 0)),
+                int(group_budget_total),
                 bool(strict_triton_required),
             )
             keep_indices = build_keep_token_indices(
                 total_tokens=group_total_tokens,
-                kv_budget=config.kv_budget,
+                kv_budget=group_budget_total,
                 prefill_len=group_prefill_len,
                 protect_prefill=protect_prefill,
                 include_prefill_in_budget=config.include_prefill_in_budget,

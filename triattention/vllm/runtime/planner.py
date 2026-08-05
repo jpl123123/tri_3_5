@@ -33,9 +33,13 @@ class CompressionPlanner:
         kv_usage: float | None = None,
         scheduled_tokens: int = 1,
         length_threshold: int | None = None,
+        kv_budget: int | None = None,
     ) -> CompressionSignal:
+        effective_budget = (
+            self.config.kv_budget if kv_budget is None else int(kv_budget)
+        )
         if length_threshold is None:
-            length_threshold = self.config.kv_budget + self.config.divide_length
+            length_threshold = effective_budget + self.config.divide_length
             # Keep scheduler trigger boundary consistent with effective budget
             # semantics used by compaction path.
             if self.config.protect_prefill and not self.config.include_prefill_in_budget:
@@ -61,4 +65,5 @@ class CompressionPlanner:
             protect_prefill=self.config.protect_prefill,
             prefill_len=prefill_len,
             scheduled_tokens=max(1, int(scheduled_tokens)),
+            kv_budget=int(effective_budget),
         )

@@ -57,6 +57,20 @@ class TriAttentionRuntimeConfig:
     protect_prefill: bool = False
     disable_compression: bool = False
 
+    dynamic_kv_budget: bool = False
+    """When True, ignore the global ``kv_budget`` for per-request decisions and
+    derive the budget from each request's prefill length via
+    :func:`triattention.vllm.runtime.dynamic_budget.resolve_dynamic_kv_budget`.
+    The static ``kv_budget`` field is then only used as a fallback for code
+    paths that have not been threaded with a per-request budget (and as the
+    documented default when dynamic mode is off)."""
+
+    dynamic_kv_budget_upper_bound: int = 0
+    """Largest budget the dynamic mapping can ever return (0 when dynamic mode
+    is off). Used as the selector's baked-in ``kv_budget`` so the trig cache
+    table covers long contexts, and as the worst-case headroom basis for
+    ``_compute_max_chunk_for_compression``. Populated during ``from_env``."""
+
     enable_kv_usage_trigger: bool = False
     kv_usage_trigger: float = 0.98
     kv_usage_release: float = 0.90
@@ -221,6 +235,9 @@ class TriAttentionRuntimeConfig:
             protect_prefill=maybe_bool("PROTECT_PREFILL", cls.protect_prefill),
             disable_compression=maybe_bool(
                 "DISABLE_COMPRESSION", cls.disable_compression
+            ),
+            dynamic_kv_budget=maybe_bool(
+                "DYNAMIC_KV_BUDGET", cls.dynamic_kv_budget
             ),
             enable_kv_usage_trigger=maybe_bool(
                 "ENABLE_KV_USAGE_TRIGGER", cls.enable_kv_usage_trigger
@@ -407,6 +424,10 @@ class TriAttentionRuntimeConfig:
                 "DISABLE_TOP_N_HIGH_FREQ", cls.disable_top_n_high_freq
             ),
         )
+        if config.dynamic_kv_budget:
+            from .dynamic_budget import dynamic_kv_budget_upper_bound
+
+            config.dynamic_kv_budget_upper_bound = dynamic_kv_budget_upper_bound()
         config.validate()
         return config
 

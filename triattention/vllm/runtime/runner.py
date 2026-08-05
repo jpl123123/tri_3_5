@@ -10,6 +10,7 @@ from typing import Any
 from vllm.logger import logger
 
 from .config import TriAttentionRuntimeConfig
+from .dynamic_budget import resolve_dynamic_kv_budget
 from .executor import CompressionExecutor, RunnerHookCompressionExecutor
 from .fast_recency_guard import should_guard_fast_recency_long_context
 from .input_patch_backend import install_runtime_input_patch
@@ -608,11 +609,32 @@ class TriAttentionModelRunner:
             setattr(state, "current_cache_len_step", self._last_step)
         return next_len
 
+    def _resolve_req_kv_budget(self, state: Any, prefill_len: int) -> int | None:
+        """Per-request KV budget from the worker side.
+
+        Mirrors the scheduler's resolver so worker-self-triggered compressions
+        use the same per-request budget. Returns ``None`` for short requests
+        (dynamic mode, prefill_len < 16k) that must skip TriAttention entirely.
+
+        The resolved value is cached on ``state`` (RequestCompressionState) and
+        only re-derived when prefill_len grows, so the per-step hot path is a
+        single attribute read instead of a full bucket lookup.
+        """
+        if not bool(getattr(self.config, "dynamic_kv_budget", False)):
+            return int(self.config.kv_budget)
+        if state.kv_budget_prefill_len == prefill_len:
+            return state.kv_budget
+        budget = resolve_dynamic_kv_budget(prefill_len)
+        state.kv_budget = budget
+        state.kv_budget_prefill_len = prefill_len
+        return budget
+
     def _compression_threshold(
         self,
         prefill_len: int,
         *,
         is_prefill_step: bool = False,
+        kv_budget: int | None = None,
     ) -> int:
         cache_config = getattr(self._base_runner, "cache_config", None)
         block_size = int(getattr(cache_config, "block_size", 1) or 1)
@@ -622,6 +644,7 @@ class TriAttentionModelRunner:
             block_size=block_size,
             is_ascend=is_ascend_runtime(self._base_runner),
             is_prefill_step=is_prefill_step,
+            kv_budget=kv_budget,
         )
 
     def _should_defer_chunked_prefill_compression(self) -> bool:
@@ -728,6 +751,13 @@ class TriAttentionModelRunner:
             existing = signals.get(req_id)
             state = self._ensure_state_for_existing_request(req_id)
             prefill_len = state.prefill_len
+            req_budget = self._resolve_req_kv_budget(state, prefill_len)
+            if req_budget is None:
+                # Short request (dynamic mode, prefill_len < 16k): skip
+                # TriAttention entirely, including worker self-trigger.
+                if existing is not None and existing.should_compress:
+                    signals.pop(req_id, None)
+                continue
             existing_estimate = int(
                 getattr(existing, "estimated_cache_len", 0) or 0
             ) if existing is not None else 0
@@ -839,6 +869,7 @@ class TriAttentionModelRunner:
             threshold = self._compression_threshold(
                 prefill_len,
                 is_prefill_step=is_prefill_step_for_threshold,
+                kv_budget=req_budget,
             )
             if kv_includes_scheduled:
                 effective_kv = actual_kv
@@ -985,6 +1016,7 @@ class TriAttentionModelRunner:
                 prefill_len=prefill_len,
                 scheduled_tokens=scheduled_tokens_i,
                 force=physical_capacity_boundary_hit,
+                kv_budget=int(req_budget),
             )
         return signals
 

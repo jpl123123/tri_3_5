@@ -205,7 +205,7 @@ def make_runner_compression_hook(
         if not config.enable_experimental_kv_compaction:
             keep_indices_plan = build_keep_token_indices(
                 total_tokens=effective_tokens,
-                kv_budget=config.kv_budget,
+                kv_budget=budget_total,
                 prefill_len=signal.prefill_len,
                 protect_prefill=signal.protect_prefill,
                 include_prefill_in_budget=config.include_prefill_in_budget,

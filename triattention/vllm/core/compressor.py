@@ -9,7 +9,6 @@ Design Alignment:
 - Integrates with vLLM's PagedAttention infrastructure
 """
 from typing import Dict, Optional, Tuple
-import logging
 
 import torch
 
@@ -23,11 +22,6 @@ from .utils import (
     normalize_scores,
     protect_window_tokens,
 )
-
-try:
-    from vllm.logger import logger
-except Exception:  # pragma: no cover - fallback for lightweight tests/scripts
-    logger = logging.getLogger(__name__)
 
 
 class TriAttentionCompressor:
@@ -91,11 +85,6 @@ class TriAttentionCompressor:
                 device=self.config.device,
                 dtype=self.config.compute_dtype,
                 num_kv_heads=self.config.num_kv_heads,  # Pass for GQA mapping
-                # Pass the runtime model path so legacy stats (e.g. Qwen3 R-KV
-                # stats that carry no model_name/model_path) can still derive
-                # RoPE inv_freq and freq_scale_sq from the real model config
-                # instead of falling back to ones/default theta.
-                model_path=getattr(self.config, "model_path", None),
             )
         except FileNotFoundError:
             raise FileNotFoundError(
@@ -145,41 +134,6 @@ class TriAttentionCompressor:
 
         # Initialize optional trig cache for aligned rounds
         self._init_trig_cache()
-
-        # Diagnostics: log the resolved rotary geometry so that legacy vs.
-        # partial-rotary stats (Qwen3 vs Qwen3.5) can be distinguished at
-        # runtime. This helps catch silent scoring mismatches that cause
-        # accuracy regressions when a partial-rotary-aware build is used to
-        # serve a full-rotary model with legacy stats.
-        try:
-            inv_freq_src = self.metadata.get(
-                "_inv_freq_source",
-                "stats_metadata" if self.metadata.get("inv_freq") is not None else "unknown",
-            )
-            if inv_freq_src == "unknown" and self.inv_freq is not None:
-                # inv_freq was derived inside _init_rope from model_path/theta.
-                inv_freq_src = (
-                    "runtime_model_path"
-                    if getattr(self.config, "model_path", None)
-                    else "rope_theta_default"
-                )
-            logger.info(
-                "TRIATTN_STATS_INIT head_dim=%s rotary_dim=%s freq_count=%s "
-                "partial_rotary_factor=%s rope_style=%s num_kv_heads=%s "
-                "num_layers=%s inv_freq_source=%s stats_path=%s model_path=%s",
-                self.config.head_dim,
-                self.config.rotary_dim,
-                self.config.freq_count,
-                self.config.partial_rotary_factor,
-                self.config.rope_style,
-                self.config.num_kv_heads,
-                self.config.num_layers,
-                inv_freq_src,
-                str(self.config.stats_path),
-                str(getattr(self.config, "model_path", None)),
-            )
-        except Exception:
-            pass
 
         self._initialized = True
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from transformers import AutoConfig
@@ -27,51 +27,6 @@ def determine_rope_style(config: AutoConfig) -> str:
     return "half"  # front/back pairing (Qwen)
 
 
-def _normalize_rope_scaling(rope_scaling: Optional[dict]) -> dict:
-    """Normalize a model config's ``rope_scaling`` dict for transformers compatibility.
-
-    Some checkpoints (e.g. Qwen3-32B) store ``rope_scaling["factor"]`` as an
-    ``int`` (e.g. ``3``). Older transformers releases (v4.45) emit a warning
-    ``rope_scaling's factor field must be a float >= 1, got 3`` and, depending
-    on the code path, may skip applying the YaRN/linear scaling factor when the
-    value is not a ``float``. TriAttention derives ``inv_freq`` and
-    ``freq_scale_sq`` from this rotary embedding, so a silently-dropped scaling
-    factor corrupts the scoring formula and causes accuracy regressions.
-
-    This helper coerces the numeric fields (``factor``, ``attention_factor``,
-    ``beta_fast``, ``beta_slow``, ``low_freq_factor``, ``high_freq_factor``)
-    to ``float`` and migrates legacy keys (``attn_factor`` -> ``attention_factor``,
-    ``type`` -> ``rope_type``) before the rotary embedding is constructed.
-    """
-    scaling = dict(rope_scaling or {})
-    if "attn_factor" in scaling and "attention_factor" not in scaling:
-        scaling["attention_factor"] = scaling["attn_factor"]
-    scaling.pop("attn_factor", None)
-    if "rope_type" not in scaling:
-        scaling["rope_type"] = scaling.get("type", "default")
-    scaling.pop("type", None)
-
-    # Coerce numeric fields to float so transformers (v4.45 and similar) does
-    # not reject integer factors. This keeps YaRN/linear scaling intact and
-    # silences the warning that confused accuracy debugging on Qwen3.
-    _float_keys = (
-        "factor",
-        "attention_factor",
-        "beta_fast",
-        "beta_slow",
-        "low_freq_factor",
-        "high_freq_factor",
-    )
-    for key in _float_keys:
-        value = scaling.get(key)
-        if isinstance(value, bool):
-            # bool is a subclass of int; never coerce booleans.
-            continue
-        if isinstance(value, int):
-            scaling[key] = float(value)
-    return scaling
-
-
 def build_rotary(
     cache_device: torch.device,
     model_path: Path,
@@ -87,7 +42,15 @@ def build_rotary(
         if LlamaRotaryEmbedding is None:
             raise ImportError("Llama rotary embedding is unavailable in the current transformers build.")
 
-        config.rope_scaling = _normalize_rope_scaling(getattr(config, "rope_scaling", None))
+        rope_scaling = dict(config.rope_scaling or {})
+        if "attn_factor" in rope_scaling and "attention_factor" not in rope_scaling:
+            rope_scaling["attention_factor"] = rope_scaling["attn_factor"]
+        rope_scaling.pop("attn_factor", None)
+        if "rope_type" not in rope_scaling:
+            rope_scaling["rope_type"] = rope_scaling.get("type", "default")
+        rope_scaling.pop("type", None)
+        config.rope_scaling = rope_scaling
+
         rotary = LlamaRotaryEmbedding(config=config, device=cache_device)
         rotary.to(dtype=dtype, device=cache_device)
         rotary._rope_style = rope_style  # type: ignore[attr-defined]
@@ -98,7 +61,14 @@ def build_rotary(
             "Neither Qwen3 nor Qwen2 rotary embeddings are available in the installed transformers package."
         )
 
-    config.rope_scaling = _normalize_rope_scaling(getattr(config, "rope_scaling", None))
+    rope_scaling = dict(config.rope_scaling or {})
+    if "attn_factor" in rope_scaling and "attention_factor" not in rope_scaling:
+        rope_scaling["attention_factor"] = rope_scaling["attn_factor"]
+    rope_scaling.pop("attn_factor", None)
+    if "rope_type" not in rope_scaling:
+        rope_scaling["rope_type"] = rope_scaling.get("type", "default")
+    rope_scaling.pop("type", None)
+    config.rope_scaling = rope_scaling
     rotary = Qwen3RotaryEmbedding(config=config, device=cache_device)
     rotary.to(dtype=dtype)
     rotary._rope_style = rope_style  # type: ignore[attr-defined]
@@ -106,7 +76,7 @@ def build_rotary(
 
 
 def compute_frequency_scaling(
-    rotary: Any,
+    rotary: Qwen3RotaryEmbedding,
     head_dim: int,
     dtype: torch.dtype,
     device: torch.device,

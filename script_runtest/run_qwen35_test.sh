@@ -52,7 +52,6 @@ PERF_CONCURRENCY="${PERF_CONCURRENCY:-1}"
 KEEP_SERVICE="${KEEP_SERVICE:-0}"
 RUN_ACCURACY="${RUN_ACCURACY:-0}"
 REPEAT="${REPEAT:-1}"
-DEFER_PREFILL_ON_ASCEND="${DEFER_PREFILL_ON_ASCEND:-true}"
 SERVICE_READY_TIMEOUT="${SERVICE_READY_TIMEOUT:-1800}"
 
 # ========== 内部:编排模式标识 ==========
@@ -67,53 +66,6 @@ mkdir -p "${STATUS_DIR}"
 write_status() { echo "$1" > "${STATUS_DIR}/phase"; }
 read_status()  { cat "${STATUS_DIR}/phase" 2>/dev/null || echo "idle"; }
 write_info()   { echo "$1" >> "${STATUS_DIR}/run_info.txt"; }
-
-# =====================================================================
-# NPU 进程清理:杀掉所有持有 davinci 设备句柄的进程
-# 这是解决 NPU 内存泄漏的关键:setsid 启动的 vllm 服务在被杀后,
-# worker 子进程仍存活并持有 /dev/davinci* 设备句柄,
-# 导致 NPU HBM 内存不释放,下次启动报 "Free memory" 错误。
-# =====================================================================
-kill_npu_processes() {
-    local dev_list="${VISIBLE_DEVICES:-12,13}"
-    dev_list="${dev_list//,/ }"
-    local killed_any=0
-
-    # 1. 杀掉所有持有 /dev/davinci{dev} 句柄的进程
-    for dev in $dev_list; do
-        local pids=$(find /proc/*/fd -lname "*davinci${dev}" 2>/dev/null | sed 's|/proc/||;s|/fd.*||' | sort -u 2>/dev/null)
-        if [ -n "$pids" ]; then
-            for pid in $pids; do
-                if [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null; then
-                    echo "  Killing PID=$pid (holds /dev/davinci${dev})"
-                    kill -9 "$pid" 2>/dev/null || true
-                    killed_any=1
-                fi
-            done
-        fi
-    done
-
-    # 2. 杀掉 vllm 相关进程(EngineCore, Worker 等)
-    pkill -9 -f "vllm serve" 2>/dev/null || true
-    pkill -9 -f "EngineCore" 2>/dev/null || true
-    pkill -9 -f "aisbench_test\|ais_bench" 2>/dev/null || true
-    pkill -9 -f "multiprocessing.spawn\|multiprocessing.forkserver\|resource_tracker" 2>/dev/null || true
-
-    # 3. 等待 NPU 内存释放
-    if [ "$killed_any" = "1" ]; then
-        echo "  Waiting for NPU memory release..."
-        for i in $(seq 1 12); do
-            sleep 5
-            local all_free=1
-            for dev in $dev_list; do
-                local pids=$(find /proc/*/fd -lname "*davinci${dev}" 2>/dev/null | sed 's|/proc/||;s|/fd.*||' | sort -u 2>/dev/null)
-                [ -n "$pids" ] && all_free=0
-            done
-            [ "$all_free" = "1" ] && break
-        done
-    fi
-    echo "  NPU cleanup done."
-}
 
 # =====================================================================
 # --status: 查看当前进度
@@ -190,8 +142,7 @@ fi
 # =====================================================================
 if [ "${1:-}" = "--stop" ]; then
     echo "Stopping all TriAttention test processes..."
-    # 杀编排器和测试进程
-    for pid_file in "${STATUS_DIR}/orchestrator.pid" "${STATUS_DIR}/service.pid" "${STATUS_DIR}/perf.pid" "${STATUS_DIR}/bench.pid"; do
+    for pid_file in "${STATUS_DIR}/service.pid" "${STATUS_DIR}/perf.pid" "${STATUS_DIR}/bench.pid"; do
         if [ -f "${pid_file}" ]; then
             PID=$(cat "${pid_file}" 2>/dev/null)
             if [ -n "${PID}" ] && kill -0 "${PID}" 2>/dev/null; then
@@ -201,8 +152,8 @@ if [ "${1:-}" = "--stop" ]; then
             rm -f "${pid_file}"
         fi
     done
-    # 彻底清理所有 NPU 进程(包括 setsid 派生的 worker 子进程)
-    kill_npu_processes
+    # 杀掉可能残留的 vllm 进程
+    pkill -9 -f "vllm serve.*${PORT}" 2>/dev/null || true
     write_status "stopped"
     echo "Done."
     exit 0
@@ -259,9 +210,19 @@ fi
 # --start (默认): 启动后台编排器
 # =====================================================================
 if [ "${_ORCH_MODE}" = "0" ]; then
-    # --- 清理旧状态和残留 NPU 进程 ---
-    echo "Cleaning up previous processes..."
-    kill_npu_processes
+    # --- 清理旧状态 ---
+    # 如果有旧服务在跑,先停掉
+    if [ -f "${STATUS_DIR}/service.pid" ]; then
+        OLD_PID=$(cat "${STATUS_DIR}/service.pid" 2>/dev/null)
+        if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+            echo "Stopping previous service PID=${OLD_PID}..."
+            kill -9 "${OLD_PID}" 2>/dev/null || true
+            sleep 3
+        fi
+    fi
+    pkill -9 -f "vllm serve.*${PORT}" 2>/dev/null || true
+    pkill -9 -f "aisbench_test\|ais_bench" 2>/dev/null || true
+    sleep 2
 
     # 清除旧状态文件
     rm -rf "${STATUS_DIR}"
@@ -284,7 +245,6 @@ if [ "${_ORCH_MODE}" = "0" ]; then
     write_info "kv_budget=${KV_BUDGET}"
     write_info "run_accuracy=${RUN_ACCURACY}"
     write_info "repeat=${REPEAT}"
-    write_info "defer_prefill_on_ascend=${DEFER_PREFILL_ON_ASCEND}"
     write_info "perf_params=input_len=${PERF_INPUT_LEN},output_len=${PERF_OUTPUT_LEN},data_num=${PERF_DATA_NUM},concurrency=${PERF_CONCURRENCY}"
 
     echo "${SERVICE_LOG}" > "${STATUS_DIR}/service.log"
@@ -296,7 +256,7 @@ if [ "${_ORCH_MODE}" = "0" ]; then
     write_status "launching"
 
     echo "Starting TriAttention test orchestrator in background..."
-    echo "  KV_BUDGET=${KV_BUDGET}, RUN_ACCURACY=${RUN_ACCURACY}, REPEAT=${REPEAT}, DEFER_PREFILL=${DEFER_PREFILL_ON_ASCEND}"
+    echo "  KV_BUDGET=${KV_BUDGET}, RUN_ACCURACY=${RUN_ACCURACY}, REPEAT=${REPEAT}"
     echo "  Service log: ${SERVICE_LOG}"
     echo "  Perf log:    ${PERF_LOG}"
     [ "${RUN_ACCURACY}" = "1" ] && echo "  Bench log:   ${BENCH_LOG}"
@@ -328,7 +288,6 @@ if [ "${_ORCH_MODE}" = "0" ]; then
         KEEP_SERVICE="${KEEP_SERVICE}" \
         RUN_ACCURACY="${RUN_ACCURACY}" \
         REPEAT="${REPEAT}" \
-        DEFER_PREFILL_ON_ASCEND="${DEFER_PREFILL_ON_ASCEND}" \
         SERVICE_READY_TIMEOUT="${SERVICE_READY_TIMEOUT}" \
         SERVICE_LOG="${SERVICE_LOG}" \
         PERF_LOG="${PERF_LOG}" \
@@ -391,7 +350,6 @@ export TASK_QUEUE_ENABLE=1
 export ENABLE_TRIATTENTION=1
 export TRIATTN_RUNTIME_KV_BUDGET="${KV_BUDGET}"
 export TRIATTN_RUNTIME_SPARSE_STATS_PATH="${SPARSE_STATS_PATH}"
-export TRIATTN_RUNTIME_DEFER_PREFILL_COMPRESSION_ON_ASCEND="${DEFER_PREFILL_ON_ASCEND}"
 export TRIATTN_RUNTIME_LOGGING=true
 export TRIATTN_RUNTIME_LOG_DECISIONS=true
 export TRIATTN_RUNTIME_LOG_EXECUTION_PATH=true
@@ -566,10 +524,12 @@ log "Perf log:     ${PERF_LOG}"
 [ "${RUN_ACCURACY}" = "1" ] && log "Bench log:    ${BENCH_LOG}"
 log "Summary:      ${SUMMARY_FILE}"
 
-# ========== 服务清理 ==========
+# 服务清理
 if [ "${KEEP_SERVICE}" != "1" ]; then
-    log "Cleaning up service and NPU processes..."
-    kill_npu_processes
+    if kill -0 "${SERVICE_PID}" 2>/dev/null; then
+        log "Stopping service PID=${SERVICE_PID}..."
+        kill -9 "${SERVICE_PID}" 2>/dev/null || true
+    fi
 else
     log "KEEP_SERVICE=1, service PID=${SERVICE_PID} left running."
 fi
