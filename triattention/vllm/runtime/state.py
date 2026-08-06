@@ -26,6 +26,13 @@ class RequestCompressionState:
     # current_cache_len tracking.  See effective_overrides.py.
     nct_at_last_compression: int | None = None
     cache_len_after_last_compression: int | None = None
+    # Cached per-request KV budget (dynamic mode). kv_budget holds the resolved
+    # value (int) or None when the request is disabled (<16k). kv_budget_prefill_len
+    # records the prefill_len used for the last derivation; when state.prefill_len
+    # grows past it (ensure() does max()), the cache is invalidated and re-derived.
+    # -1 means "never derived" so the first call always computes.
+    kv_budget: int | None = None
+    kv_budget_prefill_len: int = -1
 
     @property
     def mode(self) -> str:

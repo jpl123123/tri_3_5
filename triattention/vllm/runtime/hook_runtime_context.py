@@ -21,7 +21,9 @@ def effective_budget_for_signal(
     signal: CompressionSignal,
     total_tokens: int,
 ) -> int:
-    budget = config.kv_budget
+    budget = int(getattr(signal, "kv_budget", 0) or 0)
+    if budget <= 0:
+        budget = int(config.kv_budget)
     if signal.protect_prefill and not config.include_prefill_in_budget:
         budget += max(signal.prefill_len, 0)
     return min(total_tokens, budget)
@@ -49,7 +51,9 @@ def effective_len_guard_upper(
     config: TriAttentionRuntimeConfig,
     signal: CompressionSignal,
 ) -> int:
-    budget = config.kv_budget
+    budget = int(getattr(signal, "kv_budget", 0) or 0)
+    if budget <= 0:
+        budget = int(config.kv_budget)
     if signal.protect_prefill and not config.include_prefill_in_budget:
         budget += max(signal.prefill_len, 0)
     return budget + max(1, config.effective_len_guard_divide_multiples) * max(

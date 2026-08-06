@@ -139,6 +139,7 @@ def _compression_threshold_for_signal(
         block_size=block_size,
         is_ascend=is_ascend,
         is_prefill_step=is_prefill_step,
+        kv_budget=int(getattr(signal, "kv_budget", 0) or 0) or None,
     )
 
 

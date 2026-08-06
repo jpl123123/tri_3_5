@@ -156,8 +156,10 @@ def compression_length_threshold(
     block_size: int,
     is_ascend: bool,
     is_prefill_step: bool = False,
+    kv_budget: int | None = None,
 ) -> int:
-    threshold = int(config.kv_budget) + compression_reclaim_interval_tokens(
+    budget = int(config.kv_budget) if kv_budget is None else int(kv_budget)
+    threshold = budget + compression_reclaim_interval_tokens(
         config,
         block_size=block_size,
         is_ascend=is_ascend,

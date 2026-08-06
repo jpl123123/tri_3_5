@@ -27,3 +27,8 @@ class CompressionSignal:
     # Worker-local hard boundary triggers cannot be delayed without risking a
     # slot write past the current block-table capacity.
     force: bool = False
+    # Per-request KV budget. 0 means "not set"; consumers fall back to the
+    # global config.kv_budget. When dynamic_kv_budget is enabled, the scheduler
+    # fills this from resolve_dynamic_kv_budget(prefill_len) so each request is
+    # compressed to its own budget instead of the global default.
+    kv_budget: int = 0

@@ -15,6 +15,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from .ascend_defaults import apply_ascend_fast_recency_defaults
 from .config import TriAttentionRuntimeConfig
+from .dynamic_budget import resolve_dynamic_kv_budget
 from .effective_len_tracker import EffectiveCacheLenTracker
 from .fast_recency_guard import should_guard_fast_recency_long_context
 from .kv_allocation_sync import (
@@ -32,6 +33,12 @@ from .thresholds import (
     is_ascend_environment_available,
 )
 from .version import RUNTIME_BUILD_ID
+
+# Threshold stored for short requests (<16k) whose compression is disabled.
+# The value is intentionally far above any realistic max_model_len so the
+# trigger can never fire; _build_signals also skips disabled requests before
+# consulting this cache, so this is defense-in-depth only.
+_DISABLED_REQUEST_THRESHOLD: int = 1 << 62
 
 def _evict_reclaimed_block_metadata(block_pool: Any, block: Any) -> None:
     """Best-effort clear of prefix-cache metadata before reusing a block."""
@@ -150,6 +157,11 @@ class TriAttentionScheduler(Scheduler):
         self._last_signal_log_steps: dict[str, int] = {}
         self._long_context_guard_logged: set[str] = set()
         self._triattention_step = 0
+        # Per-request KV budget. When dynamic_kv_budget is off, every entry is
+        # config.kv_budget (uniform global). When on, each entry is the value
+        # resolved from prefill_len, or None for short requests (<16k) that must
+        # skip TriAttention entirely (no signal, no scoring).
+        self._dynamic_kv_budgets: dict[str, int | None] = {}
 
         if self.triattention_config.logging_enabled:
             logger.info(
@@ -166,6 +178,7 @@ class TriAttentionScheduler(Scheduler):
                 "auto_fast_recency_on_ascend=%s "
                 "early_install_proxy_on_ascend=%s "
                 "zero_copy_recency=%s zero_copy_recency_only_on_ascend=%s "
+                "dynamic_kv_budget=%s dynamic_kv_budget_upper_bound=%d "
                 "build=%s",
                 self.triattention_config.kv_budget,
                 self.triattention_config.divide_length,
@@ -186,6 +199,8 @@ class TriAttentionScheduler(Scheduler):
                 self.triattention_config.early_install_proxy_on_ascend,
                 self.triattention_config.enable_zero_copy_recency,
                 self.triattention_config.zero_copy_recency_only_on_ascend,
+                bool(getattr(self.triattention_config, "dynamic_kv_budget", False)),
+                int(getattr(self.triattention_config, "dynamic_kv_budget_upper_bound", 0)),
                 RUNTIME_BUILD_ID,
             )
 
@@ -197,11 +212,30 @@ class TriAttentionScheduler(Scheduler):
             return 0
         return request.num_prompt_tokens
 
+    def _resolve_req_kv_budget(self, req_id: str, prefill_len: int) -> int | None:
+        """Per-request KV budget.
+
+        Returns the static global budget when dynamic mode is off, the
+        prefill-length-derived budget when on, or ``None`` for short requests
+        that must skip TriAttention entirely.
+        """
+        self._ensure_runtime_fields()
+        cached = self._dynamic_kv_budgets.get(req_id)
+        if cached is not None or req_id in self._dynamic_kv_budgets:
+            return cached
+        if self.triattention_config.dynamic_kv_budget:
+            budget = resolve_dynamic_kv_budget(prefill_len)
+        else:
+            budget = int(self.triattention_config.kv_budget)
+        self._dynamic_kv_budgets[req_id] = budget
+        return budget
+
     def _compute_length_threshold(
         self,
         prefill_len: int,
         *,
         is_prefill_step: bool = False,
+        kv_budget: int | None = None,
     ) -> int:
         return compression_length_threshold(
             self.triattention_config,
@@ -209,6 +243,7 @@ class TriAttentionScheduler(Scheduler):
             block_size=int(getattr(self, "block_size", 1) or 1),
             is_ascend=_is_ascend_scheduler_instance(self),
             is_prefill_step=is_prefill_step,
+            kv_budget=kv_budget,
         )
 
     def _ensure_runtime_fields(self) -> None:
@@ -231,6 +266,8 @@ class TriAttentionScheduler(Scheduler):
             self._last_signal_log_steps = {}
         if getattr(self, "_long_context_guard_logged", None) is None:
             self._long_context_guard_logged = set()
+        if getattr(self, "_dynamic_kv_budgets", None) is None:
+            self._dynamic_kv_budgets = {}
         if getattr(self, "_triattention_step", None) is None:
             self._triattention_step = 0
 
@@ -250,7 +287,12 @@ class TriAttentionScheduler(Scheduler):
                 )
             prefill_len = _resolve_full_prefill_len_from_request_like(new_req)
             self._prefill_lens[req_id] = prefill_len
-            self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+            req_budget = self._resolve_req_kv_budget(req_id, prefill_len)
+            self._length_threshold_cache[req_id] = (
+                self._compute_length_threshold(prefill_len, kv_budget=req_budget)
+                if req_budget is not None
+                else _DISABLED_REQUEST_THRESHOLD
+            )
 
         for req_id in scheduler_output.finished_req_ids:
             req = self.requests.get(req_id)
@@ -261,6 +303,7 @@ class TriAttentionScheduler(Scheduler):
             self._length_threshold_cache.pop(req_id, None)
             self._last_signal_log_steps.pop(req_id, None)
             self._long_context_guard_logged.discard(req_id)
+            self._dynamic_kv_budgets.pop(req_id, None)
             self._effective_len_tracker.remove_request(req_id)
 
         cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
@@ -274,7 +317,12 @@ class TriAttentionScheduler(Scheduler):
             if req_id not in self._prefill_lens:
                 prefill_len = self._resolve_prefill_len(req_id)
                 self._prefill_lens[req_id] = prefill_len
-                self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+                req_budget = self._resolve_req_kv_budget(req_id, prefill_len)
+                self._length_threshold_cache[req_id] = (
+                    self._compute_length_threshold(prefill_len, kv_budget=req_budget)
+                    if req_budget is not None
+                    else _DISABLED_REQUEST_THRESHOLD
+                )
 
     def _signal_log_interval_steps(self) -> int:
         cfg = self.triattention_config
@@ -374,7 +422,16 @@ class TriAttentionScheduler(Scheduler):
             if prefill_len is None:
                 prefill_len = self._resolve_prefill_len(req_id)
                 self._prefill_lens[req_id] = prefill_len
-                self._length_threshold_cache[req_id] = self._compute_length_threshold(prefill_len)
+            req_budget = self._resolve_req_kv_budget(req_id, prefill_len)
+            if req_budget is None:
+                # Short request (dynamic mode, prefill_len < 16k): skip
+                # TriAttention entirely for this request — no signal, so the
+                # worker hook and scoring kernel are never invoked.
+                continue
+            if req_id not in self._length_threshold_cache:
+                self._length_threshold_cache[req_id] = self._compute_length_threshold(
+                    prefill_len, kv_budget=req_budget
+                )
             effective_tokens = max(
                 int(getattr(request, "num_computed_tokens", 0) or 0),
                 prefill_len,
@@ -438,6 +495,7 @@ class TriAttentionScheduler(Scheduler):
                         threshold = self._compute_length_threshold(
                             prefill_len,
                             is_prefill_step=True,
+                            kv_budget=req_budget,
                         )
                     else:
                         threshold = self._length_threshold_cache.get(req_id)
@@ -445,6 +503,7 @@ class TriAttentionScheduler(Scheduler):
                         threshold = self._compute_length_threshold(
                             prefill_len,
                             is_prefill_step=is_prefill_step,
+                            kv_budget=req_budget,
                         )
                         self._length_threshold_cache[req_id] = threshold
                         if self.triattention_config.log_decisions:
@@ -453,7 +512,7 @@ class TriAttentionScheduler(Scheduler):
                                 "prefill_len=%d is_prefill_step=%s budget=%d divide_length=%d",
                                 req_id, threshold, prefill_len,
                                 is_prefill_step,
-                                self.triattention_config.kv_budget,
+                                req_budget,
                                 self.triattention_config.divide_length,
                             )
                     if estimated_cache_len < threshold:
@@ -466,9 +525,11 @@ class TriAttentionScheduler(Scheduler):
                 step=self._triattention_step,
                 kv_usage=kv_usage,
                 scheduled_tokens=scheduled_tokens_i,
+                kv_budget=req_budget,
                 length_threshold=self._compute_length_threshold(
                     prefill_len,
                     is_prefill_step=is_prefill_step,
+                    kv_budget=req_budget,
                 ),
             )
             # Keep scheduler->runner side-channel sparse to reduce per-step IPC
@@ -513,12 +574,45 @@ class TriAttentionScheduler(Scheduler):
             return None
         block_size = int(getattr(self, "block_size", 16) or 16)
         physical_kv = total_blocks * block_size
-        headroom = physical_kv - self.triattention_config.kv_budget
+        cap_budget = self._resolve_running_max_kv_budget()
+        headroom = physical_kv - cap_budget
         if headroom <= 0:
             return None
         # Leave a small margin (one block) for allocation bookkeeping.
         headroom = max(1, headroom - block_size)
         return headroom
+
+    def _resolve_running_max_kv_budget(self) -> int:
+        """Worst-case KV budget across running requests.
+
+        In static mode this is the global config.kv_budget. In dynamic mode it
+        is the largest per-request budget among running requests that actually
+        engage compression; requests whose compression is disabled (prefill_len
+        < 16k) are excluded so they do not over-restrict chunk scheduling. When
+        no running request engages compression, the configured upper bound (or
+        static default) is used as a safe fallback.
+        """
+        cfg = self.triattention_config
+        if not bool(getattr(cfg, "dynamic_kv_budget", False)):
+            return int(cfg.kv_budget)
+        running = getattr(self, "running", None)
+        if not isinstance(running, list):
+            return int(cfg.dynamic_kv_budget_upper_bound or cfg.kv_budget)
+        self._ensure_runtime_fields()
+        budgets: list[int] = []
+        for request in running:
+            req_id = getattr(request, "request_id", None) or getattr(request, "req_id", None)
+            if req_id is None:
+                continue
+            budget = self._dynamic_kv_budgets.get(req_id)
+            if budget is None:
+                continue
+            budgets.append(int(budget))
+        if budgets:
+            return max(budgets)
+        # No running request engages compression: fall back to the upper bound
+        # so the headroom stays valid if a long request is admitted next step.
+        return int(cfg.dynamic_kv_budget_upper_bound or cfg.kv_budget)
 
     def schedule(self) -> SchedulerOutput:
         self._sync_effective_kv_offsets_before_schedule()
@@ -933,5 +1027,6 @@ class TriAttentionScheduler(Scheduler):
             self._prefill_lens.pop(req_id, None)
             self._prefill_compression_counts.pop(req_id, None)
             self._long_context_guard_logged.discard(req_id)
+            self._dynamic_kv_budgets.pop(req_id, None)
             self._effective_len_tracker.remove_request(req_id)
         return outputs
