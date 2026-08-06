@@ -118,6 +118,7 @@ def _patched_scheduler_init(self, *args, **kwargs):
     self._length_threshold_cache = {}
     self._last_signal_log_steps = {}
     self._long_context_guard_logged = set()
+    self._dynamic_kv_budgets = {}
     self._triattention_step = 0
     if cfg.logging_enabled:
         logger.info(
@@ -149,12 +150,47 @@ def _compute_max_chunk_for_compression(self, cfg: TriAttentionRuntimeConfig) -> 
         return None
     block_size = int(getattr(self, "block_size", 16) or 16)
     physical_kv = total_blocks * block_size
-    headroom = physical_kv - cfg.kv_budget
+    cap_budget = _resolve_cap_kv_budget(self, cfg)
+    headroom = physical_kv - cap_budget
     if headroom <= 0:
         return None
     # Leave a small margin (one block) for allocation bookkeeping.
     headroom = max(1, headroom - block_size)
     return headroom
+
+
+def _resolve_cap_kv_budget(
+    self: Any,
+    cfg: TriAttentionRuntimeConfig,
+) -> int:
+    """Worst-case KV budget for the per-step chunk cap.
+
+    In static mode this is the global ``cfg.kv_budget``. In dynamic mode it is
+    the largest per-request budget among running requests that actually engage
+    compression (disabled / <16k requests are excluded so they do not over-
+    restrict chunk scheduling for the whole batch); when no running request
+    engages compression, the configured upper bound is used as a safe fallback.
+    """
+    if not bool(getattr(cfg, "dynamic_kv_budget", False)):
+        return int(cfg.kv_budget)
+    running = getattr(self, "running", None)
+    if not isinstance(running, list):
+        return int(getattr(cfg, "dynamic_kv_budget_upper_bound", 0) or cfg.kv_budget)
+    dynamic_budgets = getattr(self, "_dynamic_kv_budgets", None)
+    if not isinstance(dynamic_budgets, dict):
+        return int(getattr(cfg, "dynamic_kv_budget_upper_bound", 0) or cfg.kv_budget)
+    budgets: list[int] = []
+    for request in running:
+        req_id = getattr(request, "request_id", None) or getattr(request, "req_id", None)
+        if req_id is None:
+            continue
+        budget = dynamic_budgets.get(req_id)
+        if budget is None:
+            continue
+        budgets.append(int(budget))
+    if budgets:
+        return max(budgets)
+    return int(getattr(cfg, "dynamic_kv_budget_upper_bound", 0) or cfg.kv_budget)
 
 
 def _patched_scheduler_schedule(self):
@@ -245,6 +281,8 @@ def _patched_scheduler_update_from_output(self, scheduler_output, model_runner_o
         self._length_threshold_cache.pop(req_id, None)
         self._last_signal_log_steps.pop(req_id, None)
         self._long_context_guard_logged.discard(req_id)
+        if isinstance(getattr(self, "_dynamic_kv_budgets", None), dict):
+            self._dynamic_kv_budgets.pop(req_id, None)
         self._effective_len_tracker.remove_request(req_id)
     return outputs
 
@@ -733,6 +771,11 @@ def install_vllm_integration_monkeypatches(
         Scheduler.update_from_output = _patched_scheduler_update_from_output
         # Attach helper methods used by the patched wrappers.
         Scheduler._resolve_prefill_len = TriAttentionScheduler._resolve_prefill_len
+        # _resolve_req_kv_budget is invoked by _sync_prefill_lens and
+        # _build_signals (both attached below), so it must be attached too.
+        Scheduler._resolve_req_kv_budget = (
+            TriAttentionScheduler._resolve_req_kv_budget
+        )
         Scheduler._compute_length_threshold = TriAttentionScheduler._compute_length_threshold
         Scheduler._ensure_runtime_fields = TriAttentionScheduler._ensure_runtime_fields
         Scheduler._sync_prefill_lens = TriAttentionScheduler._sync_prefill_lens

@@ -307,15 +307,30 @@ def build_triattention_selector(
             filtered = [entries[-1]]
         return _pick_uniform_entries(filtered, score_max_layers)
 
+    # When dynamic_kv_budget is on, the per-request budget is carried by each
+    # CompressionSignal and consumed via budget_total at top-k time. The value
+    # baked into this TriAttentionConfig only sizes the precomputed trig cache
+    # table (max_seq_len = max(offset_max_length, kv_budget + divide_length))
+    # and caps window_size. It must therefore be the LARGEST budget the dynamic
+    # mapping can ever return, not the static env default, so long contexts are
+    # covered. The actual per-request top-k still uses the passed budget_total.
+    baked_kv_budget = (
+        int(getattr(config, "dynamic_kv_budget_upper_bound", 0) or 0)
+        if bool(getattr(config, "dynamic_kv_budget", False))
+        else int(config.kv_budget)
+    )
+    if baked_kv_budget <= 0:
+        baked_kv_budget = int(config.kv_budget)
+
     tri_cfg = TriAttentionConfig(
         stats_path=stats_path,
         model_path=effective_model_path,
-        kv_budget=config.kv_budget,
+        kv_budget=baked_kv_budget,
         divide_length=config.divide_length,
         pruning_mode=pruning_mode,
         score_aggregation=config.sparse_score_aggregation,
         sparse_normalize_scores=config.sparse_normalize_scores,
-        window_size=min(config.window_size, max(config.kv_budget - 1, 0)),
+        window_size=min(config.window_size, max(baked_kv_budget - 1, 0)),
         include_prefill_in_budget=config.include_prefill_in_budget,
         protect_prefill=config.protect_prefill,
         disable_mlr=config.disable_mlr,
